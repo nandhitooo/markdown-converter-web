@@ -95,3 +95,4 @@ export async function convertDocumentToMarkdown(file) {
 
   throw new Error("Please upload a .docx or .pdf file.");
 }
+

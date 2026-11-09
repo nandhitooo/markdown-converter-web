@@ -15,6 +15,7 @@
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 
+  --bg-page: #f8fafc;
   --text: #475569;
   --text-h: #0f172a;
   --bg: #ffffff;
@@ -34,7 +35,7 @@
 body {
   margin: 0;
   min-height: 100vh;
-  background: linear-gradient(180deg, #f8fafc 0%, #eef2ff 100%);
+  background: var(--bg-page);
 }
 
 #root {
@@ -52,3 +53,4 @@ h2,
 p {
   margin: 0;
 }
+
