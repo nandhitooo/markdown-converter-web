@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { convertDocumentToMarkdown } from "../utils/documentUtils";
 import { baseName, downloadText } from "../utils/fileUtils";
+import { useFileDrop } from "../hooks/useFileDrop";
 
 export default function ToMarkdown() {
   const [markdown, setMarkdown] = useState("");
@@ -24,6 +25,8 @@ export default function ToMarkdown() {
     }
   };
 
+  const { dragging, dropProps } = useFileDrop(handleFile);
+
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(markdown);
@@ -34,7 +37,7 @@ export default function ToMarkdown() {
   };
 
   return (
-    <section>
+    <section {...dropProps} className={dragging ? "dropping" : ""}>
       <div className="toolbar">
         <label className="btn">
           {loading ? "Memproses…" : "Pilih .docx / .pdf"}
@@ -66,7 +69,7 @@ export default function ToMarkdown() {
       <textarea
         value={markdown}
         onChange={(e) => setMarkdown(e.target.value)}
-        placeholder="Hasil Markdown muncul di sini."
+        placeholder="Drag & drop file .docx / .pdf ke halaman ini, atau pakai tombol Pilih."
       />
     </section>
   );

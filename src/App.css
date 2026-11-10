@@ -36,3 +36,10 @@ textarea {
   .split { grid-template-columns: 1fr; }
   textarea, .preview { min-height: 45vh; max-height: none; }
 }
+
+.dropping {
+  outline: 2px dashed var(--accent);
+  outline-offset: 6px;
+  border-radius: 8px;
+  background: var(--accent-bg);
+}
