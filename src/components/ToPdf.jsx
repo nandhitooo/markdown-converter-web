@@ -1,11 +1,24 @@
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { markdownToHtml, printMarkdownAsPdf } from "../utils/pdfUtils";
 import { baseName } from "../utils/fileUtils";
 
 export default function ToPdf() {
   const [markdown, setMarkdown] = useState("");
   const [fileName, setFileName] = useState("dokumen.md");
-  const html = useMemo(() => markdownToHtml(markdown), [markdown]);
+  const [html, setHtml] = useState("");
+
+  // Render (termasuk diagram Mermaid) dengan debounce supaya tidak berat saat mengetik.
+  useEffect(() => {
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      const out = await markdownToHtml(markdown);
+      if (!cancelled) setHtml(out);
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [markdown]);
 
   const loadFile = async (file) => {
     if (!file) return;
