@@ -56,3 +56,10 @@
   border: 1px dashed var(--border); border-radius: 8px; color: var(--text);
 }
 .pe-footer { margin-top: 0.5rem; }
+
+.pe-overlay.tool-edit { cursor: default; touch-action: pan-x pan-y; }
+.pe-textbox { position: absolute; cursor: text; touch-action: manipulation; }
+.pe-textbox:hover { background: rgba(79, 70, 229, 0.14); outline: 1px solid var(--accent); }
+.ann-retext { cursor: text; }
+.ann-retext-text { position: absolute; white-space: pre; line-height: 1.2; pointer-events: none; }
+.pe-bi { min-width: 34px; padding: 0.35rem 0.5rem; }

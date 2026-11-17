@@ -13,16 +13,18 @@ import {
 } from "../utils/pdfEditUtils";
 
 const TOOLS = [
+  { id: "edit", label: "Edit teks" },
   { id: "select", label: "Pilih" },
-  { id: "text", label: "Teks" },
+  { id: "text", label: "Tambah teks" },
   { id: "draw", label: "Pensil" },
   { id: "highlight", label: "Sorot" },
   { id: "cover", label: "Tutup" },
 ];
 
 const TOOL_HINTS = {
+  edit: "Klik teks asli di PDF untuk mengubahnya.",
   select: "Klik anotasi untuk memilih, seret untuk memindahkan.",
-  text: "Klik di halaman untuk menaruh teks.",
+  text: "Klik di halaman untuk menambah teks baru.",
   draw: "Tahan dan seret untuk menggambar / tanda tangan.",
   highlight: "Seret untuk menyorot area.",
   cover: "Seret untuk menutup area dengan kotak (default putih).",
@@ -125,6 +127,7 @@ export default function PdfEditor({ active }) {
       } else {
         setSources({ [srcId]: src });
         replaceAll(newPages);
+        setTool("edit");
         setFileName(file.name);
         setStatus(`Dimuat: ${file.name} (${newPages.length} halaman)`);
       }
@@ -174,6 +177,8 @@ export default function PdfEditor({ active }) {
     if (annot.type === "text") {
       setFocusId(annot.id);
       setTool("select");
+    } else if (annot.type === "retext") {
+      setFocusId(annot.id);
     }
   };
 
@@ -395,7 +400,7 @@ export default function PdfEditor({ active }) {
         <div className="pe-panel">
           {selectedAnnot ? (
             <>
-              {selectedAnnot.type === "text" && (
+              {(selectedAnnot.type === "text" || selectedAnnot.type === "retext") && (
                 <>
                   <textarea
                     ref={textAreaRef}
@@ -419,6 +424,24 @@ export default function PdfEditor({ active }) {
                       }
                     />
                   </label>
+                  <button
+                    type="button"
+                    className={`btn pe-bi${selectedAnnot.bold ? " primary" : ""}`}
+                    style={{ fontWeight: 700 }}
+                    title="Tebal"
+                    onClick={() => patchAnnot(selected.pageId, selected.id, { bold: !selectedAnnot.bold })}
+                  >
+                    B
+                  </button>
+                  <button
+                    type="button"
+                    className={`btn pe-bi${selectedAnnot.italic ? " primary" : ""}`}
+                    style={{ fontStyle: "italic" }}
+                    title="Miring"
+                    onClick={() => patchAnnot(selected.pageId, selected.id, { italic: !selectedAnnot.italic })}
+                  >
+                    I
+                  </button>
                 </>
               )}
               {selectedAnnot.type === "path" && (
@@ -462,6 +485,20 @@ export default function PdfEditor({ active }) {
                   />
                 </label>
               )}
+              {selectedAnnot.type === "retext" && (
+                <label className="pe-field" title="Warna latar yang menutup teks asli">
+                  Latar
+                  <span className="pe-color">
+                    <input
+                      type="color"
+                      value={selectedAnnot.bg}
+                      onChange={(e) =>
+                        patchAnnot(selected.pageId, selected.id, { bg: e.target.value }, key(`bg${selected.id}`))
+                      }
+                    />
+                  </span>
+                </label>
+              )}
               {(selectedAnnot.type === "highlight" || selectedAnnot.type === "cover") && (
                 <label className="pe-field">
                   Opasitas
@@ -478,11 +515,11 @@ export default function PdfEditor({ active }) {
                 </label>
               )}
               <button className="btn" onClick={() => deleteAnnot(selected.pageId, selected.id)}>
-                Hapus
+                {selectedAnnot.type === "retext" ? "Kembalikan asli" : "Hapus"}
               </button>
             </>
           ) : (
-            <span className="status">Pilih anotasi untuk mengubah teks, ukuran, atau warnanya.</span>
+            <span className="status">Pilih teks atau anotasi untuk mengubah isi, ukuran, atau warnanya.</span>
           )}
         </div>
       )}

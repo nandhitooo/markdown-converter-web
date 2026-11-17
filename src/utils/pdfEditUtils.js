@@ -71,6 +71,152 @@ export async function fileToImage(file, max = 1600) {
   return { dataUrl: canvas.toDataURL(mime, 0.92), mime, ar: h / w };
 }
 
+
+// Deteksi teks asli di halaman. Hasil dinormalisasi ke koordinat tampilan (0..1, kiri-atas).
+export async function loadTextItems(pdf, srcIndex, R) {
+  const page = await pdf.getPage(srcIndex + 1);
+  const vp = page.getViewport({ scale: 1, rotation: R });
+  try {
+    await page.getOperatorList(); // memastikan font sudah termuat (untuk deteksi bold/italic)
+  } catch {
+    /* abaikan */
+  }
+  const tc = await page.getTextContent();
+
+  const fontInfo = (fontName) => {
+    let name = "";
+    try {
+      if (page.commonObjs.has(fontName)) name = page.commonObjs.get(fontName)?.name || "";
+    } catch {
+      /* font belum ter-resolve */
+    }
+    const css = tc.styles?.[fontName]?.fontFamily || "";
+    let family = "sans";
+    if (/courier|mono|consolas/i.test(name) || /monospace/i.test(css)) family = "mono";
+    else if (
+      (/times|serif|georgia|garamond|cambria|minion|palatino|bookman/i.test(name) && !/sans/i.test(name)) ||
+      css === "serif"
+    ) {
+      family = "serif";
+    }
+    return {
+      family,
+      bold: /bold|black|heavy|semibold|demi/i.test(name),
+      italic: /italic|oblique/i.test(name),
+    };
+  };
+
+  const raw = [];
+  for (const it of tc.items) {
+    if (!("str" in it) || !it.str.trim() || !(it.width > 0)) continue;
+    const t = pdfjsLib.Util.transform(vp.transform, it.transform);
+    const h = Math.hypot(t[2], t[3]);
+    // Hanya teks yang tampil tegak/horizontal.
+    if (!(t[0] > 0 && t[3] < 0 && Math.abs(t[1]) < 0.05 * t[0]) || h < 2) continue;
+    raw.push({ str: it.str, x: t[4], y: t[5], w: it.width, h, fontName: it.fontName });
+  }
+
+  // Gabungkan potongan teks berurutan yang berada di satu baris dan satu font.
+  const merged = [];
+  for (const r of raw) {
+    const last = merged[merged.length - 1];
+    if (last && last.fontName === r.fontName) {
+      const gap = r.x - (last.x + last.w);
+      if (Math.abs(last.y - r.y) < 0.2 * r.h && Math.abs(last.h - r.h) < 0.15 * r.h && gap > -0.2 * r.h && gap < 0.6 * r.h) {
+        const needSpace = gap > 0.12 * r.h && !/\s$/.test(last.str) && !/^\s/.test(r.str);
+        last.str += (needSpace ? " " : "") + r.str;
+        last.w = r.x + r.w - last.x;
+        continue;
+      }
+    }
+    merged.push({ ...r });
+  }
+
+  const W = vp.width;
+  const H = vp.height;
+  return merged.map((m) => {
+    const padX = 1.5;
+    const left = m.x - padX;
+    const right = m.x + m.w + padX;
+    const top = m.y - 0.8 * m.h;
+    const bottom = m.y + 0.2 * m.h;
+    return {
+      str: m.str,
+      x: left / W,
+      y: top / H,
+      w: (right - left) / W,
+      h: (bottom - top) / H,
+      bx: m.x / W,
+      by: m.y / H,
+      fs: m.h / W,
+      ...fontInfo(m.fontName),
+    };
+  });
+}
+
+// Ambil perkiraan warna latar & warna teks dari canvas hasil render pada area (u0,v0)-(u1,v1).
+export function sampleColors(canvas, u0, v0, u1, v1) {
+  const fallback = { bg: "#ffffff", fg: "#000000" };
+  try {
+    if (!canvas || canvas.width < 8) return fallback;
+    const x = Math.max(0, Math.floor(u0 * canvas.width));
+    const y = Math.max(0, Math.floor(v0 * canvas.height));
+    const w = Math.max(2, Math.min(canvas.width - x, Math.ceil((u1 - u0) * canvas.width)));
+    const h = Math.max(2, Math.min(canvas.height - y, Math.ceil((v1 - v0) * canvas.height)));
+    const data = canvas.getContext("2d").getImageData(x, y, w, h).data;
+    const at = (i, j) => (j * w + i) * 4;
+
+    // Latar = warna paling sering di tepi kotak.
+    const buckets = new Map();
+    const add = (i, j) => {
+      const k = at(i, j);
+      const key = ((data[k] >> 4) << 8) | ((data[k + 1] >> 4) << 4) | (data[k + 2] >> 4);
+      const b = buckets.get(key) || { n: 0, r: 0, g: 0, b: 0 };
+      b.n += 1;
+      b.r += data[k];
+      b.g += data[k + 1];
+      b.b += data[k + 2];
+      buckets.set(key, b);
+    };
+    for (let i = 0; i < w; i += 1) {
+      add(i, 0);
+      add(i, h - 1);
+    }
+    for (let j = 0; j < h; j += 1) {
+      add(0, j);
+      add(w - 1, j);
+    }
+    let best = null;
+    for (const b of buckets.values()) if (!best || b.n > best.n) best = b;
+    const bg = [best.r / best.n, best.g / best.n, best.b / best.n];
+
+    // Teks = rata-rata piksel yang paling jauh dari warna latar.
+    const dist = (k) => Math.abs(data[k] - bg[0]) + Math.abs(data[k + 1] - bg[1]) + Math.abs(data[k + 2] - bg[2]);
+    let max = 0;
+    for (let k = 0; k < data.length; k += 4) max = Math.max(max, dist(k));
+    let fg = [0, 0, 0];
+    if (max > 60) {
+      let n = 0;
+      const sum = [0, 0, 0];
+      for (let k = 0; k < data.length; k += 4) {
+        if (dist(k) > 0.8 * max) {
+          sum[0] += data[k];
+          sum[1] += data[k + 1];
+          sum[2] += data[k + 2];
+          n += 1;
+        }
+      }
+      fg = sum.map((v) => v / n);
+    } else {
+      fg = bg.map((v) => (v > 128 ? 0 : 255));
+    }
+    const hex = (c) => `#${c.map((v) => Math.round(v).toString(16).padStart(2, "0")).join("")}`;
+    return { bg: hex(bg), fg: hex(fg) };
+  } catch {
+    return fallback;
+  }
+}
+
 const hexToRgb = (hex) => {
   const m = /^#?([0-9a-f]{6})$/i.exec(hex || "");
   const n = m ? parseInt(m[1], 16) : 0;
@@ -97,7 +243,19 @@ function makeMapper(cb, R) {
 export async function exportPdf(sources, pages) {
   const out = await PDFDocument.create();
   const font = await out.embedFont(StandardFonts.Helvetica);
-  const supported = new Set(font.getCharacterSet());
+  const supported = new Set(font.getCharacterSet()); // WinAnsi: sama untuk semua font standar
+  const fontCache = new Map();
+  const getFont = async ({ family = "sans", bold = false, italic = false } = {}) => {
+    const F = StandardFonts;
+    const table = {
+      sans: [F.Helvetica, F.HelveticaBold, F.HelveticaOblique, F.HelveticaBoldOblique],
+      serif: [F.TimesRoman, F.TimesRomanBold, F.TimesRomanItalic, F.TimesRomanBoldItalic],
+      mono: [F.Courier, F.CourierBold, F.CourierOblique, F.CourierBoldOblique],
+    };
+    const name = (table[family] || table.sans)[(bold ? 1 : 0) + (italic ? 2 : 0)];
+    if (!fontCache.has(name)) fontCache.set(name, await out.embedFont(name));
+    return fontCache.get(name);
+  };
   let replaced = 0;
 
   const clean = (s) => {
@@ -155,12 +313,34 @@ export async function exportPdf(sources, pages) {
     for (const a of p.annots) {
       if (a.type === "text") {
         const size = a.fs * dispW;
+        const f = await getFont(a);
         clean(a.text || "")
           .split("\n")
           .forEach((line, i) => {
             if (!line.trim()) return;
             const [x, y] = toUser(a.x, a.y + (0.95 * size + i * 1.2 * size) / dispH);
-            page.drawText(line, { x, y, size, font, color: hexToRgb(a.color), rotate: degrees(R) });
+            page.drawText(line, { x, y, size, font: f, color: hexToRgb(a.color), rotate: degrees(R) });
+          });
+      } else if (a.type === "retext") {
+        // Tutup teks asli dengan warna latar, lalu tulis teks pengganti di baseline yang sama.
+        const [x1, y1] = toUser(a.x, a.y);
+        const [x2, y2] = toUser(a.x + a.w, a.y + a.h);
+        page.drawRectangle({
+          x: Math.min(x1, x2),
+          y: Math.min(y1, y2),
+          width: Math.abs(x2 - x1),
+          height: Math.abs(y2 - y1),
+          color: hexToRgb(a.bg),
+          borderWidth: 0,
+        });
+        const size = a.fs * dispW;
+        const f = await getFont(a);
+        clean(a.text || "")
+          .split("\n")
+          .forEach((line, i) => {
+            if (!line.trim()) return;
+            const [x, y] = toUser(a.bx, a.by + (i * 1.2 * size) / dispH);
+            page.drawText(line, { x, y, size, font: f, color: hexToRgb(a.color), rotate: degrees(R) });
           });
       } else if (a.type === "highlight" || a.type === "cover") {
         const [x1, y1] = toUser(a.x, a.y);

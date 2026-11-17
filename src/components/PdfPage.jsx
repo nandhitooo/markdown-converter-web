@@ -1,5 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import { pageDisplaySize, rotationOf, uid } from "../utils/pdfEditUtils";
+import { loadTextItems, pageDisplaySize, rotationOf, sampleColors, uid } from "../utils/pdfEditUtils";
+
+const fontStyle = (a) => ({
+  fontFamily:
+    a.family === "serif"
+      ? 'Georgia, "Times New Roman", Times, serif'
+      : a.family === "mono"
+        ? 'Consolas, "Courier New", monospace'
+        : "Helvetica, Arial, sans-serif",
+  fontWeight: a.bold ? 700 : 400,
+  fontStyle: a.italic ? "italic" : "normal",
+});
 
 const clamp = (n) => Math.min(1, Math.max(0, n));
 const pathD = (points, w, h) => {
@@ -38,6 +49,7 @@ export default function PdfPage({
   const draftRef = useRef(null);
   const [draft, setDraftState] = useState(null);
   const [visible, setVisible] = useState(index < 2);
+  const [items, setItems] = useState(null); // teks asli yang terdeteksi (null = belum dimuat)
 
   const setDraft = (d) => {
     draftRef.current = d;
@@ -87,6 +99,23 @@ export default function PdfPage({
     };
   }, [pdf, page.srcId, page.srcIndex, R, scale, visible]);
 
+  // Deteksi teks asli hanya saat mode "Edit teks" dipakai.
+  useEffect(() => {
+    if (tool !== "edit" || !pdf || !page.srcId) return undefined;
+    let cancelled = false;
+    setItems(null);
+    loadTextItems(pdf, page.srcIndex, R)
+      .then((res) => {
+        if (!cancelled) setItems(res);
+      })
+      .catch(() => {
+        if (!cancelled) setItems([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tool === "edit", pdf, page.srcId, page.srcIndex, R]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const point = (e) => {
     const r = overlayRef.current.getBoundingClientRect();
     return [clamp((e.clientX - r.left) / r.width), clamp((e.clientY - r.top) / r.height)];
@@ -98,7 +127,7 @@ export default function PdfPage({
     if (e.pointerType === "mouse" && e.button !== 0) return;
     const [u, v] = point(e);
 
-    if (tool === "select") {
+    if (tool === "select" || tool === "edit") {
       onSelect(null);
       return;
     }
@@ -142,6 +171,36 @@ export default function PdfPage({
         ? { id: uid("an"), type: "highlight", x, y, w, h, color: "#ffeb3b", opacity: 0.4 }
         : { id: uid("an"), type: "cover", x, y, w, h, color: "#ffffff", opacity: 1 },
     );
+  };
+
+  // ---------- Mengedit teks asli ----------
+  const editItem = (e, item, i) => {
+    e.stopPropagation();
+    onActivate(page.id);
+    const existing = page.annots.find((a) => a.type === "retext" && a.origIdx === i);
+    if (existing) {
+      onSelect(existing.id);
+      return;
+    }
+    const { bg, fg } = sampleColors(canvasRef.current, item.x, item.y, item.x + item.w, item.y + item.h);
+    onAdd({
+      id: uid("an"),
+      type: "retext",
+      origIdx: i,
+      x: item.x,
+      y: item.y,
+      w: item.w,
+      h: item.h,
+      bx: item.bx,
+      by: item.by,
+      fs: item.fs,
+      text: item.str,
+      color: fg,
+      bg,
+      family: item.family,
+      bold: item.bold,
+      italic: item.italic,
+    });
   };
 
   // ---------- Menggeser anotasi yang sudah ada ----------
@@ -198,10 +257,54 @@ export default function PdfPage({
         <div
           key={a.id}
           className={cls}
-          style={{ left: `${a.x * 100}%`, top: `${a.y * 100}%`, fontSize: a.fs * pxW, color: a.color, ...pe }}
+          style={{
+            left: `${a.x * 100}%`,
+            top: `${a.y * 100}%`,
+            fontSize: a.fs * pxW,
+            color: a.color,
+            ...fontStyle(a),
+            ...pe,
+          }}
           {...handlers(a)}
         >
           {a.text || " "}
+        </div>
+      );
+    }
+    if (a.type === "retext") {
+      const fsPx = a.fs * pxW;
+      return (
+        <div
+          key={a.id}
+          className={cls}
+          style={{
+            left: `${a.x * 100}%`,
+            top: `${a.y * 100}%`,
+            width: `${a.w * 100}%`,
+            height: `${a.h * 100}%`,
+            background: a.bg,
+            pointerEvents: selectable || tool === "edit" ? "auto" : "none",
+            cursor: "text",
+          }}
+          onPointerDown={(e) => {
+            if (!selectable && tool !== "edit") return;
+            e.stopPropagation();
+            onActivate(page.id);
+            onSelect(a.id);
+          }}
+        >
+          <div
+            className="ann-retext-text"
+            style={{
+              left: (a.bx - a.x) * pxW,
+              top: (a.by - a.y) * pxH - 0.95 * fsPx,
+              fontSize: fsPx,
+              color: a.color,
+              ...fontStyle(a),
+            }}
+          >
+            {a.text}
+          </div>
         </div>
       );
     }
@@ -269,6 +372,7 @@ export default function PdfPage({
       <div className="pe-page-head">
         <span>
           Halaman {index + 1} / {total}
+          {tool === "edit" && items && items.length === 0 && page.srcId && " — tidak ada teks terdeteksi (mungkin hasil scan)"}
         </span>
         <span className="pe-page-actions">
           <button type="button" title="Naikkan" disabled={index === 0} onClick={() => onMove(-1)}>↑</button>
@@ -302,6 +406,24 @@ export default function PdfPage({
           onPointerCancel={onOverlayUp}
         >
           {page.annots.map(renderAnnot)}
+
+          {tool === "edit" &&
+            items?.map((it, i) =>
+              page.annots.some((a) => a.type === "retext" && a.origIdx === i) ? null : (
+                <div
+                  key={`ti${i}`}
+                  className="pe-textbox"
+                  title={it.str}
+                  style={{
+                    left: `${it.x * 100}%`,
+                    top: `${it.y * 100}%`,
+                    width: `${it.w * 100}%`,
+                    height: `${it.h * 100}%`,
+                  }}
+                  onPointerDown={(e) => editItem(e, it, i)}
+                />
+              ),
+            )}
 
           {draft?.kind === "path" && (
             <svg className="ann-svg" width={pxW} height={pxH}>
