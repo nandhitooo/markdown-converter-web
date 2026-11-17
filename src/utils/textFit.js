@@ -1,6 +1,8 @@
 // Pengukuran & tata letak teks pengganti (retext / celltext).
 // Dipakai bersama oleh tampilan (preview) dan ekspor PDF supaya hasilnya identik.
 import { PDFDocument, StandardFonts } from "pdf-lib";
+import fontkit from "@pdf-lib/fontkit";
+import { fontBytes, isCustomFont, stdFamilyOf, variantKey } from "./fonts";
 
 const F = StandardFonts;
 const NAMES = {
@@ -17,28 +19,70 @@ const DESC = 0.25;
 
 let fonts = null;
 let supported = null;
+let metricsDoc = null;
+const custom = new Map(); // "family|varian" -> PDFFont (untuk pengukuran)
+const customSets = new Map();
+const pending = new Map();
 
 // Font standar dimuat sekali; layout memakai metrik yang sama dengan hasil ekspor.
 export const metricsReady = (async () => {
   const doc = await PDFDocument.create();
+  doc.registerFontkit(fontkit);
   const map = new Map();
   for (const n of new Set(Object.values(NAMES).flat())) map.set(n, await doc.embedFont(n));
   supported = new Set(map.get(F.Helvetica).getCharacterSet());
   fonts = map;
+  metricsDoc = doc;
 })().catch(() => {});
 
-export const fontNameOf = ({ family = "sans", bold = false, italic = false } = {}) =>
-  (NAMES[family] || NAMES.sans)[(bold ? 1 : 0) + (italic ? 2 : 0)];
+const customKey = (style) => `${style.family}|${variantKey(style)}`;
 
-// Ganti karakter yang tidak didukung font standar (WinAnsi) dengan "?".
-export function sanitize(text) {
+// Muat metrik font kustom (async). Setelah selesai, pengukuran memakai ukuran huruf sebenarnya.
+export function ensureMetrics(style) {
+  if (!isCustomFont(style.family)) return Promise.resolve(true);
+  const k = customKey(style);
+  if (custom.has(k)) return Promise.resolve(true);
+  if (!pending.has(k)) {
+    pending.set(
+      k,
+      (async () => {
+        await metricsReady;
+        const bytes = await fontBytes(style.family, style);
+        const f = await metricsDoc.embedFont(bytes, { subset: false });
+        custom.set(k, f);
+        customSets.set(k, new Set(f.getCharacterSet()));
+      })()
+        .then(() => true)
+        .catch(() => false),
+    );
+  }
+  return pending.get(k);
+}
+
+export const fontReady = (style) => !isCustomFont(style.family) || custom.has(customKey(style));
+
+export const fontNameOf = ({ family = "sans", bold = false, italic = false } = {}) =>
+  (NAMES[stdFamilyOf(family)] || NAMES.sans)[(bold ? 1 : 0) + (italic ? 2 : 0)];
+
+function resolveFont(style = {}) {
+  const st = { ...style, family: style.family || "sans" };
+  if (isCustomFont(st.family)) {
+    const k = customKey(st);
+    if (custom.has(k)) return { font: custom.get(k), set: customSets.get(k) };
+  }
+  return { font: fonts?.get(fontNameOf(st)) || null, set: supported };
+}
+
+// Ganti karakter yang tidak didukung font terpilih dengan "?".
+export function sanitize(text, style) {
+  const { set } = resolveFont(style);
   let out = "";
   let replaced = 0;
   for (const ch of String(text ?? "").replace(/\r/g, "")) {
     const cp = ch.codePointAt(0);
     if (cp === 10) out += ch;
     else if (cp === 9) out += "    ";
-    else if (!supported || supported.has(cp)) out += ch;
+    else if (!set || set.has(cp)) out += ch;
     else {
       out += "?";
       replaced += 1;
@@ -49,11 +93,11 @@ export function sanitize(text) {
 
 export function measureText(text, style, size) {
   if (!text) return 0;
-  const f = fonts?.get(fontNameOf(style));
-  const s = sanitize(text).text.replace(/\n/g, "");
-  if (!f) return s.length * size * 0.52;
+  const { font } = resolveFont(style);
+  const s = sanitize(text, style).text.replace(/\n/g, "");
+  if (!font) return s.length * size * 0.52;
   try {
-    return f.widthOfTextAtSize(s, size);
+    return font.widthOfTextAtSize(s, size);
   } catch {
     return s.length * size * 0.52;
   }
@@ -112,7 +156,7 @@ export function layoutText(a, W, H) {
   const topLim = isCell ? a.y * H : -Infinity;
   const botLim = isCell ? (a.y + a.h) * H : a.limB != null ? a.limB * H : Infinity;
 
-  const { text: clean, replaced } = sanitize(a.text ?? "");
+  const { text: clean, replaced } = sanitize(a.text ?? "", a);
   const raw = String(a.text ?? "").replace(/\r/g, "").split("\n");
   const m = (s, f) => measureText(s, a, f);
   const widest = (ls, f) => ls.reduce((mx, l) => Math.max(mx, m(l, f)), 0);

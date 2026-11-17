@@ -7,14 +7,10 @@ import {
   sampleColors,
   uid,
 } from "../utils/pdfEditUtils";
+import { fontCss } from "../utils/fonts";
 
 const fontStyle = (a) => ({
-  fontFamily:
-    a.family === "serif"
-      ? 'Georgia, "Times New Roman", Times, serif'
-      : a.family === "mono"
-        ? 'Consolas, "Courier New", monospace'
-        : "Helvetica, Arial, sans-serif",
+  fontFamily: fontCss(a.family),
   fontWeight: a.bold ? 700 : 400,
   fontStyle: a.italic ? "italic" : "normal",
 });
@@ -35,6 +31,7 @@ export default function PdfPage({
   tool,
   color,
   showCells,
+  defaultFamily,
   selectedId,
   rootRef,
   onActivate,
@@ -145,7 +142,7 @@ export default function PdfPage({
       return;
     }
     if (tool === "text") {
-      onAdd({ id: uid("an"), type: "text", x: u, y: v, fs: 0.022, text: "Ketik teks", color });
+      onAdd({ id: uid("an"), type: "text", x: u, y: v, fs: 0.022, text: "Ketik teks", color, family: defaultFamily });
       return;
     }
     e.currentTarget.setPointerCapture(e.pointerId);

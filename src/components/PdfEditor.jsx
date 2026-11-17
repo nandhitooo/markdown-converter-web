@@ -3,10 +3,12 @@ import "../styles/pdf-editor.css";
 import PdfPage from "./PdfPage";
 import { useFileDrop } from "../hooks/useFileDrop";
 import { baseName, downloadBlob } from "../utils/fileUtils";
+import { FONTS, ensureFace, fontCss, fontOf } from "../utils/fonts";
 import {
   A4,
   exportPdf,
   fileToImage,
+  ensureMetrics,
   layoutText,
   metricsReady,
   openPdf,
@@ -30,6 +32,23 @@ const TOOL_HINTS = {
   draw: "Tahan dan seret untuk menggambar / tanda tangan.",
   highlight: "Seret untuk menyorot area.",
   cover: "Seret untuk menutup area dengan kotak (default putih).",
+};
+
+const TEXT_TYPES = ["text", "retext", "celltext"];
+const FONT_GROUPS = ["Standar", "Sans-serif", "Serif", "Monospace"];
+
+// Gaya (font + variasi) yang dipakai oleh semua teks di dokumen.
+const usedStyles = (pages, extraFamily) => {
+  const m = new Map();
+  for (const p of pages) {
+    for (const a of p.annots) {
+      if (!TEXT_TYPES.includes(a.type)) continue;
+      const st = { family: a.family || "sans", bold: !!a.bold, italic: !!a.italic };
+      m.set(`${st.family}|${st.bold}|${st.italic}`, st);
+    }
+  }
+  if (extraFamily) m.set(`${extraFamily}|false|false`, { family: extraFamily, bold: false, italic: false });
+  return [...m.values()];
 };
 
 const FIT_MODES = [
@@ -87,6 +106,8 @@ export default function PdfEditor({ active }) {
   const [status, setStatus] = useState("Buka PDF atau drag & drop file .pdf ke halaman ini.");
   const [busy, setBusy] = useState(false);
   const [showCells, setShowCells] = useState(true);
+  const [defaultFamily, setDefaultFamily] = useState("sans");
+  const [, setFontTick] = useState(0);
   const [metricsOk, setMetricsOk] = useState(false);
 
   const pagesRef = useRef([]);
@@ -296,6 +317,7 @@ export default function PdfEditor({ active }) {
       const name = `${baseName(fileName)}-edit.pdf`;
       downloadBlob(new Blob([bytes], { type: "application/pdf" }), name);
       // Hitung teks yang masih melewati batas areanya supaya pengguna tahu sebelum dipakai.
+      await Promise.all(usedStyles(pagesRef.current).map((st) => ensureMetrics(st)));
       let overflow = 0;
       for (const p of pagesRef.current) {
         const { W, H } = pageDisplaySize(p);
@@ -323,6 +345,39 @@ export default function PdfEditor({ active }) {
   const isFitted = selectedAnnot?.type === "retext" || selectedAnnot?.type === "celltext";
   const fitLay = isFitted && metricsOk ? layoutText(selectedAnnot, selectedSize.W, selectedSize.H) : null;
   const fitMsg = fitLay ? describeFit(fitLay) : null;
+
+  // Muat font yang dipakai (untuk tampilan & pengukuran), lalu gambar ulang setelah siap.
+  useEffect(() => {
+    let alive = true;
+    const styles = usedStyles(pages, defaultFamily);
+    Promise.all(styles.flatMap((st) => [ensureFace(st.family, st), ensureMetrics(st)])).then(() => {
+      if (alive) setFontTick((t) => t + 1);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [pages, defaultFamily]);
+
+  const changeFont = (family) => {
+    setDefaultFamily(family);
+    if (selected) patchAnnot(selected.pageId, selected.id, { family });
+  };
+
+  const applyFontToAll = (family) => {
+    let n = 0;
+    commit((ps) =>
+      ps.map((p) => ({
+        ...p,
+        annots: p.annots.map((a) => {
+          if (!TEXT_TYPES.includes(a.type) || a.family === family) return a;
+          n += 1;
+          return { ...a, family };
+        }),
+      })),
+    );
+    setDefaultFamily(family);
+    setStatus(n ? `Font “${fontOf(family).label}” diterapkan ke ${n} teks.` : "Semua teks sudah memakai font ini.");
+  };
 
   // Metrik font dimuat sekali; setelahnya semua perhitungan muat/tidak memakai ukuran sebenarnya.
   useEffect(() => {
@@ -464,6 +519,34 @@ export default function PdfEditor({ active }) {
             <>
               {(selectedAnnot.type === "text" || isFitted) && (
                 <>
+                  <label className="pe-field">
+                    Font
+                    <select
+                      className="pe-font-select"
+                      value={selectedAnnot.family || "sans"}
+                      style={{ fontFamily: fontCss(selectedAnnot.family) }}
+                      onFocus={() => FONTS.forEach((f) => ensureFace(f.id))}
+                      onChange={(e) => changeFont(e.target.value)}
+                    >
+                      {FONT_GROUPS.map((g) => (
+                        <optgroup key={g} label={g}>
+                          {FONTS.filter((f) => f.group === g).map((f) => (
+                            <option key={f.id} value={f.id} style={{ fontFamily: f.css }}>
+                              {f.label}
+                            </option>
+                          ))}
+                        </optgroup>
+                      ))}
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    className="btn"
+                    title="Pakai font ini untuk semua teks (di semua halaman)"
+                    onClick={() => applyFontToAll(selectedAnnot.family || "sans")}
+                  >
+                    Font ini untuk semua teks
+                  </button>
                   <textarea
                     ref={textAreaRef}
                     className="pe-text-input"
@@ -637,6 +720,7 @@ export default function PdfEditor({ active }) {
               tool={tool}
               color={color}
               showCells={showCells}
+              defaultFamily={defaultFamily}
               rootRef={rootRef}
               selectedId={selected?.pageId === p.id ? selected.id : null}
               onActivate={(id) => {

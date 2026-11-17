@@ -1,9 +1,11 @@
 import { PDFDocument, StandardFonts, rgb, degrees, LineCapStyle } from "pdf-lib";
 import * as pdfjsLib from "pdfjs-dist";
 import { analyzePage } from "./pageStructure";
-import { layoutText, metricsReady } from "./textFit";
+import fontkit from "@pdf-lib/fontkit";
+import { layoutText, metricsReady, ensureMetrics, fontReady } from "./textFit";
+import { fontBytes, isCustomFont, stdFamilyOf, variantKey } from "./fonts";
 
-export { layoutText, metricsReady };
+export { layoutText, metricsReady, ensureMetrics, fontReady };
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   "pdfjs-dist/build/pdf.worker.min.mjs",
@@ -204,10 +206,10 @@ function makeMapper(cb, R) {
 export async function exportPdf(sources, pages) {
   await metricsReady;
   const out = await PDFDocument.create();
-  const font = await out.embedFont(StandardFonts.Helvetica);
-  const supported = new Set(font.getCharacterSet()); // WinAnsi: sama untuk semua font standar
+  out.registerFontkit(fontkit);
   const fontCache = new Map();
-  const getFont = async ({ family = "sans", bold = false, italic = false } = {}) => {
+  const setCache = new Map();
+  const embedStd = async (family, bold, italic) => {
     const F = StandardFonts;
     const table = {
       sans: [F.Helvetica, F.HelveticaBold, F.HelveticaOblique, F.HelveticaBoldOblique],
@@ -218,9 +220,29 @@ export async function exportPdf(sources, pages) {
     if (!fontCache.has(name)) fontCache.set(name, await out.embedFont(name));
     return fontCache.get(name);
   };
+  // Font kustom di-embed (subset); bila gagal dimuat, pakai font standar yang paling mirip.
+  const getFont = async (st = {}) => {
+    const { family = "sans", bold = false, italic = false } = st;
+    if (isCustomFont(family)) {
+      const key = `${family}|${variantKey(st)}`;
+      if (!fontCache.has(key)) {
+        try {
+          const bytes = await fontBytes(family, st);
+          fontCache.set(key, await out.embedFont(bytes, { subset: true }));
+        } catch (err) {
+          console.warn("Font kustom gagal di-embed, memakai font standar:", err);
+          fontCache.set(key, await embedStd(stdFamilyOf(family), bold, italic));
+        }
+      }
+      return fontCache.get(key);
+    }
+    return embedStd(family, bold, italic);
+  };
   let replaced = 0;
 
-  const clean = (s) => {
+  const clean = (s, f) => {
+    if (!setCache.has(f)) setCache.set(f, new Set(f.getCharacterSet()));
+    const supported = setCache.get(f);
     let res = "";
     for (const ch of s.replace(/\r/g, "")) {
       const cp = ch.codePointAt(0);
@@ -276,7 +298,7 @@ export async function exportPdf(sources, pages) {
       if (a.type === "text") {
         const size = a.fs * dispW;
         const f = await getFont(a);
-        clean(a.text || "")
+        clean(a.text || "", f)
           .split("\n")
           .forEach((line, i) => {
             if (!line.trim()) return;
@@ -302,7 +324,7 @@ export async function exportPdf(sources, pages) {
         const size = lay.fs * dispW;
         const f = await getFont(a);
         for (const ln of lay.lines) {
-          const t = clean(ln.text);
+          const t = clean(ln.text, f);
           if (!t.trim()) continue;
           const [x, y] = toUser(ln.x, ln.y);
           page.drawText(t, { x, y, size, font: f, color: hexToRgb(a.color), rotate: degrees(R) });
