@@ -7,6 +7,8 @@ import {
   A4,
   exportPdf,
   fileToImage,
+  layoutText,
+  metricsReady,
   openPdf,
   pageDisplaySize,
   uid,
@@ -22,13 +24,45 @@ const TOOLS = [
 ];
 
 const TOOL_HINTS = {
-  edit: "Klik teks asli di PDF untuk mengubahnya.",
+  edit: "Klik teks atau sel tabel di PDF untuk mengubah / mengisinya.",
   select: "Klik anotasi untuk memilih, seret untuk memindahkan.",
-  text: "Klik di halaman untuk menambah teks baru.",
+  text: "Klik halaman untuk menambah teks. Klik sel tabel kosong untuk mengisinya.",
   draw: "Tahan dan seret untuk menggambar / tanda tangan.",
   highlight: "Seret untuk menyorot area.",
   cover: "Seret untuk menutup area dengan kotak (default putih).",
 };
+
+const FIT_MODES = [
+  { id: "shrink", label: "Kecilkan", title: "Perkecil ukuran huruf otomatis agar muat" },
+  { id: "wrap", label: "Bungkus", title: "Pindahkan kelebihan teks ke baris berikutnya" },
+  { id: "free", label: "Bebas", title: "Biarkan apa adanya (bisa melewati batas)" },
+];
+const ALIGNS = [
+  { id: "left", label: "Kiri" },
+  { id: "center", label: "Tengah" },
+  { id: "right", label: "Kanan" },
+];
+
+// Ringkasan status kecocokan teks untuk panel.
+function describeFit(lay) {
+  const pct = Math.round(lay.scale * 100);
+  let r;
+  if (lay.state === "overflow") {
+    const where =
+      lay.overX > 0.6 ? `melewati batas kanan ±${Math.ceil(lay.overX)}pt` : `melewati batas bawah ±${Math.ceil(lay.overY)}pt`;
+    r = { tone: "bad", text: `Teks ${where}. Coba Kecilkan, Bungkus, atau persingkat teks.` };
+  } else if (lay.small) {
+    r = { tone: "warn", text: `Diperkecil ke ${pct}% — cukup kecil, pertimbangkan Bungkus atau persingkat teks.` };
+  } else if (lay.state === "wrapped") {
+    r = { tone: "info", text: `Dibungkus jadi ${lay.lines.length} baris${pct < 100 ? ` (${pct}%)` : ""}.` };
+  } else if (lay.state === "shrunk") {
+    r = { tone: "info", text: `Diperkecil otomatis ke ${pct}% (${Math.round(lay.fsPt * 10) / 10}pt).` };
+  } else {
+    r = { tone: "ok", text: "✓ Muat di area." };
+  }
+  if (lay.unsupported) r.text += ` ${lay.unsupported} karakter tidak didukung font standar (jadi “?”).`;
+  return r;
+}
 
 const blankPage = (W, H) => ({
   id: uid("pg"),
@@ -52,6 +86,8 @@ export default function PdfEditor({ active }) {
   const [fileName, setFileName] = useState("dokumen.pdf");
   const [status, setStatus] = useState("Buka PDF atau drag & drop file .pdf ke halaman ini.");
   const [busy, setBusy] = useState(false);
+  const [showCells, setShowCells] = useState(true);
+  const [metricsOk, setMetricsOk] = useState(false);
 
   const pagesRef = useRef([]);
   const history = useRef([]);
@@ -177,7 +213,7 @@ export default function PdfEditor({ active }) {
     if (annot.type === "text") {
       setFocusId(annot.id);
       setTool("select");
-    } else if (annot.type === "retext") {
+    } else if (annot.type === "retext" || annot.type === "celltext") {
       setFocusId(annot.id);
     }
   };
@@ -259,11 +295,18 @@ export default function PdfEditor({ active }) {
       const { bytes, replaced } = await exportPdf(sources, pagesRef.current);
       const name = `${baseName(fileName)}-edit.pdf`;
       downloadBlob(new Blob([bytes], { type: "application/pdf" }), name);
-      setStatus(
-        replaced
-          ? `Selesai: ${name}. ${replaced} karakter teks tidak didukung font standar dan diganti “?”.`
-          : `Selesai: ${name}`,
-      );
+      // Hitung teks yang masih melewati batas areanya supaya pengguna tahu sebelum dipakai.
+      let overflow = 0;
+      for (const p of pagesRef.current) {
+        const { W, H } = pageDisplaySize(p);
+        for (const a of p.annots) {
+          if ((a.type === "retext" || a.type === "celltext") && layoutText(a, W, H).state === "overflow") overflow += 1;
+        }
+      }
+      const notes = [];
+      if (replaced) notes.push(`${replaced} karakter tidak didukung font standar dan diganti “?”`);
+      if (overflow) notes.push(`${overflow} teks masih melewati batas areanya — periksa hasilnya`);
+      setStatus(notes.length ? `Selesai: ${name}. ${notes.join("; ")}.` : `Selesai: ${name}`);
     } catch (err) {
       console.error(err);
       setStatus(`Gagal membuat PDF: ${err.message || err}`);
@@ -275,7 +318,20 @@ export default function PdfEditor({ active }) {
   // ---------- Seleksi ----------
   const selectedPage = selected && pages.find((p) => p.id === selected.pageId);
   const selectedAnnot = selectedPage?.annots.find((a) => a.id === selected.id) || null;
-  const selectedW = selectedPage ? pageDisplaySize(selectedPage).W : A4.w;
+  const selectedSize = selectedPage ? pageDisplaySize(selectedPage) : { W: A4.w, H: A4.h };
+  const selectedW = selectedSize.W;
+  const isFitted = selectedAnnot?.type === "retext" || selectedAnnot?.type === "celltext";
+  const fitLay = isFitted && metricsOk ? layoutText(selectedAnnot, selectedSize.W, selectedSize.H) : null;
+  const fitMsg = fitLay ? describeFit(fitLay) : null;
+
+  // Metrik font dimuat sekali; setelahnya semua perhitungan muat/tidak memakai ukuran sebenarnya.
+  useEffect(() => {
+    let alive = true;
+    metricsReady.then(() => alive && setMetricsOk(true));
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (focusId && selectedAnnot?.id === focusId && textAreaRef.current) {
@@ -393,6 +449,12 @@ export default function PdfEditor({ active }) {
             <input type="color" value={color} onChange={(e) => setColor(e.target.value)} />
           </label>
           <span className="status">{TOOL_HINTS[tool]}</span>
+          {(tool === "edit" || tool === "text") && (
+            <label className="pe-toggle" title="Tampilkan garis bantu sel tabel yang terdeteksi">
+              <input type="checkbox" checked={showCells} onChange={(e) => setShowCells(e.target.checked)} />
+              Sorot sel tabel
+            </label>
+          )}
         </div>
       )}
 
@@ -400,12 +462,13 @@ export default function PdfEditor({ active }) {
         <div className="pe-panel">
           {selectedAnnot ? (
             <>
-              {(selectedAnnot.type === "text" || selectedAnnot.type === "retext") && (
+              {(selectedAnnot.type === "text" || isFitted) && (
                 <>
                   <textarea
                     ref={textAreaRef}
                     className="pe-text-input"
                     rows={1}
+                    placeholder="Ketik isi sel…"
                     value={selectedAnnot.text}
                     onChange={(e) =>
                       patchAnnot(selected.pageId, selected.id, { text: e.target.value }, key(selected.id))
@@ -413,6 +476,7 @@ export default function PdfEditor({ active }) {
                   />
                   <label className="pe-field">
                     Ukuran {Math.round(selectedAnnot.fs * selectedW)}pt
+                    {fitLay && fitLay.scale < 0.999 && ` → ${Math.round(fitLay.fsPt * 10) / 10}pt`}
                     <input
                       type="range"
                       min="0.008"
@@ -443,6 +507,42 @@ export default function PdfEditor({ active }) {
                     I
                   </button>
                 </>
+              )}
+              {isFitted && (
+                <div className="pe-fitrow">
+                  <span className="pe-seg" role="group" aria-label="Jika teks tidak muat">
+                    <span className="pe-seg-label">Jika tidak muat</span>
+                    {FIT_MODES.map((m) => (
+                      <button
+                        key={m.id}
+                        type="button"
+                        title={m.title}
+                        className={`pe-seg-btn${(selectedAnnot.fit || "shrink") === m.id ? " on" : ""}`}
+                        onClick={() => patchAnnot(selected.pageId, selected.id, { fit: m.id })}
+                      >
+                        {m.label}
+                      </button>
+                    ))}
+                  </span>
+                  <span className="pe-seg" role="group" aria-label="Perataan teks">
+                    <span className="pe-seg-label">Rata</span>
+                    {ALIGNS.map((m) => (
+                      <button
+                        key={m.id}
+                        type="button"
+                        className={`pe-seg-btn${(selectedAnnot.align || "left") === m.id ? " on" : ""}`}
+                        onClick={() => patchAnnot(selected.pageId, selected.id, { align: m.id })}
+                      >
+                        {m.label}
+                      </button>
+                    ))}
+                  </span>
+                  {fitMsg && (
+                    <span className={`pe-fitchip tone-${fitMsg.tone}`} role="status">
+                      {fitMsg.text}
+                    </span>
+                  )}
+                </div>
               )}
               {selectedAnnot.type === "path" && (
                 <label className="pe-field">
@@ -536,6 +636,7 @@ export default function PdfEditor({ active }) {
               scale={scale}
               tool={tool}
               color={color}
+              showCells={showCells}
               rootRef={rootRef}
               selectedId={selected?.pageId === p.id ? selected.id : null}
               onActivate={(id) => {
@@ -565,3 +666,4 @@ export default function PdfEditor({ active }) {
     </section>
   );
 }
+

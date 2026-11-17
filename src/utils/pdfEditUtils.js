@@ -1,5 +1,9 @@
 import { PDFDocument, StandardFonts, rgb, degrees, LineCapStyle } from "pdf-lib";
 import * as pdfjsLib from "pdfjs-dist";
+import { analyzePage } from "./pageStructure";
+import { layoutText, metricsReady } from "./textFit";
+
+export { layoutText, metricsReady };
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   "pdfjs-dist/build/pdf.worker.min.mjs",
@@ -72,12 +76,14 @@ export async function fileToImage(file, max = 1600) {
 }
 
 
-// Deteksi teks asli di halaman. Hasil dinormalisasi ke koordinat tampilan (0..1, kiri-atas).
-export async function loadTextItems(pdf, srcIndex, R) {
+// Deteksi struktur halaman: teks asli, garis, dan sel tabel. Hasil dinormalisasi ke
+// koordinat tampilan (0..1, kiri-atas). Lihat pageStructure.js untuk detailnya.
+export async function loadPageStructure(pdf, srcIndex, R) {
   const page = await pdf.getPage(srcIndex + 1);
   const vp = page.getViewport({ scale: 1, rotation: R });
+  let opList = { fnArray: [], argsArray: [] };
   try {
-    await page.getOperatorList(); // memastikan font sudah termuat (untuk deteksi bold/italic)
+    opList = await page.getOperatorList(); // juga memastikan font termuat (untuk deteksi bold/italic)
   } catch {
     /* abaikan */
   }
@@ -106,52 +112,7 @@ export async function loadTextItems(pdf, srcIndex, R) {
     };
   };
 
-  const raw = [];
-  for (const it of tc.items) {
-    if (!("str" in it) || !it.str.trim() || !(it.width > 0)) continue;
-    const t = pdfjsLib.Util.transform(vp.transform, it.transform);
-    const h = Math.hypot(t[2], t[3]);
-    // Hanya teks yang tampil tegak/horizontal.
-    if (!(t[0] > 0 && t[3] < 0 && Math.abs(t[1]) < 0.05 * t[0]) || h < 2) continue;
-    raw.push({ str: it.str, x: t[4], y: t[5], w: it.width, h, fontName: it.fontName });
-  }
-
-  // Gabungkan potongan teks berurutan yang berada di satu baris dan satu font.
-  const merged = [];
-  for (const r of raw) {
-    const last = merged[merged.length - 1];
-    if (last && last.fontName === r.fontName) {
-      const gap = r.x - (last.x + last.w);
-      if (Math.abs(last.y - r.y) < 0.2 * r.h && Math.abs(last.h - r.h) < 0.15 * r.h && gap > -0.2 * r.h && gap < 0.6 * r.h) {
-        const needSpace = gap > 0.12 * r.h && !/\s$/.test(last.str) && !/^\s/.test(r.str);
-        last.str += (needSpace ? " " : "") + r.str;
-        last.w = r.x + r.w - last.x;
-        continue;
-      }
-    }
-    merged.push({ ...r });
-  }
-
-  const W = vp.width;
-  const H = vp.height;
-  return merged.map((m) => {
-    const padX = 1.5;
-    const left = m.x - padX;
-    const right = m.x + m.w + padX;
-    const top = m.y - 0.8 * m.h;
-    const bottom = m.y + 0.2 * m.h;
-    return {
-      str: m.str,
-      x: left / W,
-      y: top / H,
-      w: (right - left) / W,
-      h: (bottom - top) / H,
-      bx: m.x / W,
-      by: m.y / H,
-      fs: m.h / W,
-      ...fontInfo(m.fontName),
-    };
-  });
+  return analyzePage({ tc, opList, vp, Util: pdfjsLib.Util, OPS: pdfjsLib.OPS, fontInfo });
 }
 
 // Ambil perkiraan warna latar & warna teks dari canvas hasil render pada area (u0,v0)-(u1,v1).
@@ -241,6 +202,7 @@ function makeMapper(cb, R) {
 }
 
 export async function exportPdf(sources, pages) {
+  await metricsReady;
   const out = await PDFDocument.create();
   const font = await out.embedFont(StandardFonts.Helvetica);
   const supported = new Set(font.getCharacterSet()); // WinAnsi: sama untuk semua font standar
@@ -321,27 +283,30 @@ export async function exportPdf(sources, pages) {
             const [x, y] = toUser(a.x, a.y + (0.95 * size + i * 1.2 * size) / dispH);
             page.drawText(line, { x, y, size, font: f, color: hexToRgb(a.color), rotate: degrees(R) });
           });
-      } else if (a.type === "retext") {
-        // Tutup teks asli dengan warna latar, lalu tulis teks pengganti di baseline yang sama.
-        const [x1, y1] = toUser(a.x, a.y);
-        const [x2, y2] = toUser(a.x + a.w, a.y + a.h);
-        page.drawRectangle({
-          x: Math.min(x1, x2),
-          y: Math.min(y1, y2),
-          width: Math.abs(x2 - x1),
-          height: Math.abs(y2 - y1),
-          color: hexToRgb(a.bg),
-          borderWidth: 0,
-        });
-        const size = a.fs * dispW;
-        const f = await getFont(a);
-        clean(a.text || "")
-          .split("\n")
-          .forEach((line, i) => {
-            if (!line.trim()) return;
-            const [x, y] = toUser(a.bx, a.by + (i * 1.2 * size) / dispH);
-            page.drawText(line, { x, y, size, font: f, color: hexToRgb(a.color), rotate: degrees(R) });
+      } else if (a.type === "retext" || a.type === "celltext") {
+        if (a.type === "retext") {
+          // Tutup teks asli dengan warna latar, lalu tulis teks pengganti.
+          const [x1, y1] = toUser(a.x, a.y);
+          const [x2, y2] = toUser(a.x + a.w, a.y + a.h);
+          page.drawRectangle({
+            x: Math.min(x1, x2),
+            y: Math.min(y1, y2),
+            width: Math.abs(x2 - x1),
+            height: Math.abs(y2 - y1),
+            color: hexToRgb(a.bg),
+            borderWidth: 0,
           });
+        }
+        // Tata letak yang sama persis dengan tampilan: ukuran, perataan, pembungkusan.
+        const lay = layoutText(a, dispW, dispH);
+        const size = lay.fs * dispW;
+        const f = await getFont(a);
+        for (const ln of lay.lines) {
+          const t = clean(ln.text);
+          if (!t.trim()) continue;
+          const [x, y] = toUser(ln.x, ln.y);
+          page.drawText(t, { x, y, size, font: f, color: hexToRgb(a.color), rotate: degrees(R) });
+        }
       } else if (a.type === "highlight" || a.type === "cover") {
         const [x1, y1] = toUser(a.x, a.y);
         const [x2, y2] = toUser(a.x + a.w, a.y + a.h);
@@ -382,3 +347,4 @@ export async function exportPdf(sources, pages) {
 
   return { bytes: await out.save(), replaced };
 }
+

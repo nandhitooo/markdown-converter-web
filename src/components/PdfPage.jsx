@@ -1,5 +1,12 @@
-import { useEffect, useRef, useState } from "react";
-import { loadTextItems, pageDisplaySize, rotationOf, sampleColors, uid } from "../utils/pdfEditUtils";
+import { Fragment, useEffect, useRef, useState } from "react";
+import {
+  layoutText,
+  loadPageStructure,
+  pageDisplaySize,
+  rotationOf,
+  sampleColors,
+  uid,
+} from "../utils/pdfEditUtils";
 
 const fontStyle = (a) => ({
   fontFamily:
@@ -12,6 +19,7 @@ const fontStyle = (a) => ({
   fontStyle: a.italic ? "italic" : "normal",
 });
 
+const ASC = 0.95; // posisi baseline dalam kotak baris (sama dengan ekspor)
 const clamp = (n) => Math.min(1, Math.max(0, n));
 const pathD = (points, w, h) => {
   const pts = points.length === 1 ? [points[0], [points[0][0] + 0.0001, points[0][1]]] : points;
@@ -26,6 +34,7 @@ export default function PdfPage({
   scale,
   tool,
   color,
+  showCells,
   selectedId,
   rootRef,
   onActivate,
@@ -49,7 +58,10 @@ export default function PdfPage({
   const draftRef = useRef(null);
   const [draft, setDraftState] = useState(null);
   const [visible, setVisible] = useState(index < 2);
-  const [items, setItems] = useState(null); // teks asli yang terdeteksi (null = belum dimuat)
+  const [structure, setStructure] = useState(null); // { items, cells } hasil deteksi (null = belum dimuat)
+  const items = structure ? structure.items : null;
+  const cells = structure ? structure.cells : [];
+  const needStructure = tool === "edit" || tool === "text";
 
   const setDraft = (d) => {
     draftRef.current = d;
@@ -99,22 +111,23 @@ export default function PdfPage({
     };
   }, [pdf, page.srcId, page.srcIndex, R, scale, visible]);
 
-  // Deteksi teks asli hanya saat mode "Edit teks" dipakai.
+  // Deteksi teks asli + tabel hanya saat mode "Edit teks" / "Tambah teks" dipakai.
   useEffect(() => {
-    if (tool !== "edit" || !pdf || !page.srcId) return undefined;
+    if (!needStructure || !pdf || !page.srcId) return undefined;
     let cancelled = false;
-    setItems(null);
-    loadTextItems(pdf, page.srcIndex, R)
+    setStructure(null);
+    loadPageStructure(pdf, page.srcIndex, R)
       .then((res) => {
-        if (!cancelled) setItems(res);
+        if (!cancelled) setStructure(res);
       })
-      .catch(() => {
-        if (!cancelled) setItems([]);
+      .catch((err) => {
+        console.error(err);
+        if (!cancelled) setStructure({ items: [], cells: [] });
       });
     return () => {
       cancelled = true;
     };
-  }, [tool === "edit", pdf, page.srcId, page.srcIndex, R]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [needStructure, pdf, page.srcId, page.srcIndex, R]);
 
   const point = (e) => {
     const r = overlayRef.current.getBoundingClientRect();
@@ -200,7 +213,54 @@ export default function PdfPage({
       family: item.family,
       bold: item.bold,
       italic: item.italic,
+      align: item.align,
+      fit: "shrink",
+      anc: item.anc,
+      lim: item.lim,
+      limB: item.limB,
     });
+  };
+
+  // ---------- Mengisi sel tabel kosong ----------
+  const fillCell = (c) => {
+    const ref = c.style.refItem >= 0 ? items[c.style.refItem] : null;
+    const fg = ref ? sampleColors(canvasRef.current, ref.x, ref.y, ref.x + ref.w, ref.y + ref.h).fg : "#111827";
+    onAdd({
+      id: uid("an"),
+      type: "celltext",
+      cellKey: c.key,
+      x: c.x,
+      y: c.y,
+      w: c.w,
+      h: c.h,
+      anc: { l: c.x + c.pad, c: c.x + c.w / 2, r: c.x + c.w - c.pad },
+      lim: [c.x + c.pad, c.x + c.w - c.pad],
+      fs: c.style.fs,
+      text: "",
+      color: fg,
+      family: c.style.family,
+      bold: false,
+      italic: false,
+      align: "left",
+      fit: "shrink",
+    });
+  };
+
+  const onCellDown = (e, c) => {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    const existing = page.annots.find((a) => a.type === "celltext" && a.cellKey === c.key);
+    if (existing) {
+      e.stopPropagation();
+      onActivate(page.id);
+      onSelect(existing.id);
+    } else if (c.items.length === 1 && tool === "edit") {
+      editItem(e, items[c.items[0]], c.items[0]); // klik di mana saja dalam sel = edit teksnya
+    } else if (c.items.length === 0) {
+      e.stopPropagation();
+      onActivate(page.id);
+      fillCell(c);
+    }
+    // sel berisi banyak teks: biarkan klik diteruskan (pilih teks langsung / tambah teks bebas)
   };
 
   // ---------- Menggeser anotasi yang sudah ada ----------
@@ -271,41 +331,90 @@ export default function PdfPage({
         </div>
       );
     }
-    if (a.type === "retext") {
-      const fsPx = a.fs * pxW;
+    if (a.type === "retext" || a.type === "celltext") {
+      const lay = layoutText(a, W, H);
+      const fsPx = lay.fs * pxW;
+      const mode = a.fit || "shrink";
+      const patchFit = (fit) => onPatch(a.id, { fit }, `fit:${a.id}`);
+      const hasText = lay.lines.some((l) => l.text.trim());
+      const showBar = sel && hasText && (lay.state === "overflow" || lay.small);
+      const barLeft = Math.max(4, Math.min(lay.bbox.x0 * pxW, pxW - 300));
       return (
-        <div
-          key={a.id}
-          className={cls}
-          style={{
-            left: `${a.x * 100}%`,
-            top: `${a.y * 100}%`,
-            width: `${a.w * 100}%`,
-            height: `${a.h * 100}%`,
-            background: a.bg,
-            pointerEvents: selectable || tool === "edit" ? "auto" : "none",
-            cursor: "text",
-          }}
-          onPointerDown={(e) => {
-            if (!selectable && tool !== "edit") return;
-            e.stopPropagation();
-            onActivate(page.id);
-            onSelect(a.id);
-          }}
-        >
+        <Fragment key={a.id}>
           <div
-            className="ann-retext-text"
+            className={cls}
             style={{
-              left: (a.bx - a.x) * pxW,
-              top: (a.by - a.y) * pxH - 0.95 * fsPx,
-              fontSize: fsPx,
-              color: a.color,
-              ...fontStyle(a),
+              left: `${a.x * 100}%`,
+              top: `${a.y * 100}%`,
+              width: `${a.w * 100}%`,
+              height: `${a.h * 100}%`,
+              background: a.type === "retext" ? a.bg : "transparent",
+              pointerEvents: selectable || tool === "edit" ? "auto" : "none",
+              cursor: "text",
+            }}
+            onPointerDown={(e) => {
+              if (!selectable && tool !== "edit") return;
+              e.stopPropagation();
+              onActivate(page.id);
+              onSelect(a.id);
             }}
           >
-            {a.text}
+            {lay.lines.map((ln, i) => (
+              <div
+                key={i}
+                className="ann-retext-text"
+                style={{
+                  left: (ln.x - a.x) * pxW,
+                  top: (ln.y - a.y) * pxH - ASC * fsPx,
+                  fontSize: fsPx,
+                  color: a.color,
+                  ...fontStyle(a),
+                }}
+              >
+                {ln.text}
+              </div>
+            ))}
           </div>
-        </div>
+          {sel && hasText && (
+            <>
+              <div
+                className="pe-fit-room"
+                style={{
+                  left: `${lay.room.x0 * 100}%`,
+                  width: `${(lay.room.x1 - lay.room.x0) * 100}%`,
+                  top: `${lay.bbox.y0 * 100}%`,
+                  height: `${(lay.bbox.y1 - lay.bbox.y0) * 100}%`,
+                }}
+              />
+              <div
+                className={`pe-fit-bbox tone-${lay.state}`}
+                style={{
+                  left: `${lay.bbox.x0 * 100}%`,
+                  width: `${Math.max(0, lay.bbox.x1 - lay.bbox.x0) * 100}%`,
+                  top: `${lay.bbox.y0 * 100}%`,
+                  height: `${(lay.bbox.y1 - lay.bbox.y0) * 100}%`,
+                }}
+              />
+            </>
+          )}
+          {showBar && (
+            <div
+              className={`pe-fitbar${lay.state === "overflow" ? " bad" : ""}`}
+              style={{ left: barLeft, top: lay.bbox.y1 * pxH + 6 }}
+              onPointerDown={(e) => e.stopPropagation()}
+            >
+              <span>
+                {lay.state === "overflow"
+                  ? lay.overX > 0.6
+                    ? `Melewati batas kanan ±${Math.ceil(lay.overX)}pt`
+                    : `Melewati batas bawah ±${Math.ceil(lay.overY)}pt`
+                  : `Teks diperkecil jadi ${Math.round(lay.scale * 100)}%`}
+              </span>
+              {mode !== "wrap" && <button type="button" onClick={() => patchFit("wrap")}>Bungkus baris</button>}
+              {mode !== "shrink" && <button type="button" onClick={() => patchFit("shrink")}>Kecilkan</button>}
+            </div>
+          )}
+        </Fragment>
       );
     }
     if (a.type === "highlight" || a.type === "cover") {
@@ -372,7 +481,14 @@ export default function PdfPage({
       <div className="pe-page-head">
         <span>
           Halaman {index + 1} / {total}
-          {tool === "edit" && items && items.length === 0 && page.srcId && " — tidak ada teks terdeteksi (mungkin hasil scan)"}
+          {needStructure &&
+            structure &&
+            page.srcId &&
+            (structure.items.length === 0 && structure.cells.length === 0
+              ? " — tidak ada teks/tabel terdeteksi (mungkin hasil scan)"
+              : structure.cells.length > 0
+                ? ` — ${structure.cells.length} sel tabel terdeteksi`
+                : "")}
         </span>
         <span className="pe-page-actions">
           <button type="button" title="Naikkan" disabled={index === 0} onClick={() => onMove(-1)}>↑</button>
@@ -405,6 +521,27 @@ export default function PdfPage({
           onPointerUp={onOverlayUp}
           onPointerCancel={onOverlayUp}
         >
+          {needStructure &&
+            cells.map((c) => {
+              const filled =
+                c.items.length > 0 ||
+                page.annots.some((a) => a.type === "celltext" && a.cellKey === c.key && a.text);
+              return (
+                <div
+                  key={`cell${c.key}`}
+                  className={`pe-cell${showCells ? " show" : ""}${filled ? "" : " empty"}`}
+                  title={filled ? undefined : "Klik untuk mengisi sel"}
+                  style={{
+                    left: `${c.x * 100}%`,
+                    top: `${c.y * 100}%`,
+                    width: `${c.w * 100}%`,
+                    height: `${c.h * 100}%`,
+                  }}
+                  onPointerDown={(e) => onCellDown(e, c)}
+                />
+              );
+            })}
+
           {page.annots.map(renderAnnot)}
 
           {tool === "edit" &&
@@ -456,3 +593,4 @@ export default function PdfPage({
     </div>
   );
 }
+
