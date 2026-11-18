@@ -219,6 +219,14 @@ export function analyzePage({ tc, opList, vp, Util, OPS, fontInfo }) {
       anc: { l: m.x / W, c: cx / W, r: right / W },
       lim: [lim0 / W, lim1 / W],
       limB: limB / H,
+      clip: cell
+        ? {
+            x: (cell.x0 + 0.6) / W,
+            y: (cell.y0 + 0.6) / H,
+            w: (cell.x1 - cell.x0 - 1.2) / W,
+            h: (cell.y1 - cell.y0 - 1.2) / H,
+          }
+        : null,
       cell: cellOf[idx],
       glyphBox: glyphBox.has(idx) ? glyphBox.get(idx) : null,
     };
@@ -230,6 +238,19 @@ export function analyzePage({ tc, opList, vp, Util, OPS, fontInfo }) {
     if (ci >= 0) cellItems[ci].push(idx);
   });
   const pageFs = median(items.map((m) => m.h)) || 11;
+
+  // Titik sisip untuk "Perbesar sel": garis horizontal tepat di atas tepi bawah sel, bebas teks/garis lain.
+  const splitOf = (c) => {
+    let textBottom = -Infinity;
+    for (const m of items) {
+      const mid = m.y - 0.3 * m.h;
+      if (mid >= c.y0 - 1 && mid <= c.y1 + 1) textBottom = Math.max(textBottom, m.y + 0.25 * m.h);
+    }
+    const y = c.y1 - 1.2;
+    if (textBottom + 1.1 > y) return null;
+    if (hLines.some((h) => h.pos > y - 1.3 && h.pos < y + 0.2)) return null;
+    return y / H;
+  };
 
   const cells = rawCells.map((c, i) => {
     const sameRow = rawCells
@@ -262,10 +283,16 @@ export function analyzePage({ tc, opList, vp, Util, OPS, fontInfo }) {
       w: (c.x1 - c.x0 - 2 * INSET) / W,
       h: (c.y1 - c.y0 - 2 * INSET) / H,
       pad: padOf / W,
+      splitY: splitOf(c),
       items: cellItems[i],
       style,
     };
   });
 
-  return { items: outItems, cells, boxes, W, H };
+  let bottom = 0;
+  for (const m of items) bottom = Math.max(bottom, m.y + 0.25 * m.h);
+  for (const h of hLines) bottom = Math.max(bottom, h.pos);
+  for (const v of vLines) bottom = Math.max(bottom, v.b);
+
+  return { items: outItems, cells, boxes, contentBottom: bottom / H, W, H };
 }

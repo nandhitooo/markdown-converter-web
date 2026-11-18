@@ -139,6 +139,13 @@ export function wrapLine(line, width, size, style) {
  * Hasil: { fs, lines:[{text,x,y,w}], bbox, room, state, scale, overX, overY, unsupported, ... }
  *   state: "ok" | "shrunk" | "wrapped" | "overflow"
  */
+// Kotak pemotong teks: teks tidak boleh tampil melewati garis sel (kecuali mode "Bebas").
+export function clipBoxOf(a) {
+  if ((a.fit || "shrink") === "free") return null;
+  if (a.type === "celltext") return { x: a.x, y: a.y, w: a.w, h: a.h };
+  return a.clip || null;
+}
+
 export function layoutText(a, W, H) {
   const align = a.align || "left";
   const mode = a.fit || "shrink";
@@ -154,7 +161,13 @@ export function layoutText(a, W, H) {
     align === "left" ? lim1 - ax : align === "right" ? ax - lim0 : lim1 - lim0,
   );
   const topLim = isCell ? a.y * H : -Infinity;
-  const botLim = isCell ? (a.y + a.h) * H : a.limB != null ? a.limB * H : Infinity;
+  const botLim = isCell
+    ? (a.y + a.h) * H
+    : mode === "grow" && a.clip
+      ? (a.clip.y + a.clip.h) * H
+      : a.limB != null
+        ? a.limB * H
+        : Infinity;
 
   const { text: clean, replaced } = sanitize(a.text ?? "", a);
   const raw = String(a.text ?? "").replace(/\r/g, "").split("\n");
@@ -185,8 +198,24 @@ export function layoutText(a, W, H) {
   let fs = base;
   let lines = raw;
 
-  if (mode === "wrap") {
+  if (mode === "grow") {
+    // Ukuran huruf tetap; baris dibungkus dan sel diperbesar (lihat stretch.js).
     lines = wrapAll(base);
+  } else if (mode === "wrap") {
+    // Bungkus; bila sel kurang tinggi, huruf diperkecil bertahap sampai muat (maks. sampai MIN_SCALE).
+    let done = false;
+    for (let s = 1; s >= MIN_SCALE - 1e-6 && !done; s -= 0.05) {
+      const ls = wrapAll(base * s);
+      if (okH(ls.length, base * s)) {
+        fs = base * s;
+        lines = ls;
+        done = true;
+      }
+    }
+    if (!done) {
+      fs = base * MIN_SCALE;
+      lines = wrapAll(fs);
+    }
   } else if (mode === "shrink") {
     const w0 = widest(raw, base);
     const sw = w0 > availW ? (availW / w0) * 0.997 : 1;
@@ -230,6 +259,18 @@ export function layoutText(a, W, H) {
   const minX = rows.length ? Math.min(...rows.map((r) => r.x)) : ax;
   const maxX = rows.length ? Math.max(...rows.map((r) => r.x + r.w)) : ax;
 
+  let growPt = 0;
+  if (mode === "grow") {
+    if (isCell) {
+      const baseH = (a.baseH ?? a.h) * H;
+      const block = lines.length * LINE_H * fs;
+      growPt = Math.max(0, lines.length > 1 ? block + 5 - baseH : block - baseH);
+    } else if (a.clip || a.baseClip) {
+      const bc = a.baseClip || a.clip;
+      growPt = Math.max(0, p.bottom + 1.5 - (bc.y + bc.h) * H);
+    }
+  }
+
   const overX = Math.max(0, widest(lines, fs) - availW, lim0 - minX, maxX - lim1);
   const overY = Math.max(0, p.bottom - botLim, topLim - p.top);
   const overflow = overX > 0.6 || overY > 0.6;
@@ -251,5 +292,8 @@ export function layoutText(a, W, H) {
     overY,
     unsupported: replaced,
     sanitized: clean,
+    clipped: overflow && !!clipBoxOf(a),
+    growPt,
+    mode,
   };
 }

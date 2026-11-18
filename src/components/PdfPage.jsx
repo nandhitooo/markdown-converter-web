@@ -1,5 +1,6 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
+  clipBoxOf,
   layoutText,
   loadPageStructure,
   pageDisplaySize,
@@ -8,6 +9,7 @@ import {
   uid,
 } from "../utils/pdfEditUtils";
 import { fontCss } from "../utils/fonts";
+import { mapStructure } from "../utils/stretch";
 
 const fontStyle = (a) => ({
   fontFamily: fontCss(a.family),
@@ -33,6 +35,7 @@ export default function PdfPage({
   showCells,
   defaultFamily,
   onRemove,
+  onMeta,
   selectedId,
   rootRef,
   onActivate,
@@ -57,9 +60,13 @@ export default function PdfPage({
   const [draft, setDraftState] = useState(null);
   const [visible, setVisible] = useState(index < 2);
   const [structure, setStructure] = useState(null); // { items, cells } hasil deteksi (null = belum dimuat)
-  const items = structure ? structure.items : null;
-  const cells = structure ? structure.cells : [];
-  const boxes = structure?.boxes || [];
+  // Struktur sumber dipetakan ke koordinat tampilan bila ada ruang yang disisipkan (Perbesar sel).
+  const view = useMemo(() => mapStructure(structure, page.stretches), [structure, page.stretches]);
+  const items = view ? view.items : null;
+  const cells = view ? view.cells : [];
+  const boxes = view?.boxes || [];
+  const baseRef = useRef(null); // hasil render halaman asli (sebelum ruang disisipkan)
+  const [baseTick, setBaseTick] = useState(0);
   const needStructure = tool === "edit" || tool === "text" || tool === "check";
 
   const setDraft = (d) => {
@@ -84,6 +91,7 @@ export default function PdfPage({
     const canvas = canvasRef.current;
     if (!canvas || !pdf || !page.srcId) return undefined;
     if (!visible) {
+      baseRef.current = null;
       canvas.width = 1;
       canvas.height = 1;
       return undefined;
@@ -95,11 +103,16 @@ export default function PdfPage({
       if (cancelled) return;
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       const viewport = p.getViewport({ scale: scale * dpr, rotation: R });
-      canvas.width = Math.floor(viewport.width);
-      canvas.height = Math.floor(viewport.height);
-      task = p.render({ canvas, canvasContext: canvas.getContext("2d"), viewport });
+      const base = document.createElement("canvas");
+      base.width = Math.floor(viewport.width);
+      base.height = Math.floor(viewport.height);
+      task = p.render({ canvas: base, canvasContext: base.getContext("2d"), viewport });
       try {
         await task.promise;
+        if (!cancelled) {
+          baseRef.current = base;
+          setBaseTick((t) => t + 1);
+        }
       } catch (err) {
         if (err?.name !== "RenderingCancelledException") console.error(err);
       }
@@ -109,6 +122,41 @@ export default function PdfPage({
       task?.cancel();
     };
   }, [pdf, page.srcId, page.srcIndex, R, scale, visible]);
+
+  // Susun kanvas tampilan: potongan halaman digeser ke bawah, celah diisi dengan garis tabel yang diregangkan.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const base = baseRef.current;
+    if (!canvas || !base) return;
+    const w = base.width;
+    const h = base.height;
+    if (canvas.width !== w) canvas.width = w;
+    if (canvas.height !== h) canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    const sts = [...(page.stretches || [])].sort((x, y) => x.at - y.at);
+    ctx.clearRect(0, 0, w, h);
+    if (!sts.length) {
+      ctx.drawImage(base, 0, 0);
+      return;
+    }
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, w, h);
+    const strip = Math.max(1, Math.round(h / H)); // 1pt sumber diregangkan untuk mengisi celah
+    let cum = 0; // px
+    let from = 0; // px (sumber)
+    const slice = (s0, s1) => {
+      if (s1 > s0) ctx.drawImage(base, 0, s0, w, s1 - s0, 0, s0 + cum, w, s1 - s0);
+    };
+    for (const s of sts) {
+      const at = Math.round(s.at * h);
+      const gap = Math.round(s.d * h);
+      slice(from, at);
+      if (gap > 0) ctx.drawImage(base, 0, Math.max(0, at - strip), w, strip, 0, at + cum, w, gap);
+      cum += gap;
+      from = at;
+    }
+    slice(from, h);
+  }, [baseTick, page.stretches, H, visible]);
 
   // Deteksi teks asli + tabel hanya saat mode "Edit teks" / "Tambah teks" dipakai.
   useEffect(() => {
@@ -127,6 +175,10 @@ export default function PdfPage({
       cancelled = true;
     };
   }, [needStructure, pdf, page.srcId, page.srcIndex, R]);
+
+  useEffect(() => {
+    if (structure && structure.contentBottom != null) onMeta?.(page.id, { contentBottom: structure.contentBottom });
+  }, [structure]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const point = (e) => {
     const r = overlayRef.current.getBoundingClientRect();
@@ -222,6 +274,9 @@ export default function PdfPage({
       anc: item.anc,
       lim: item.lim,
       limB: item.limB,
+      clip: item.clip,
+      baseClip: item.clip,
+      growSrcAt: item.cell >= 0 && R === 0 ? (cells[item.cell]?.splitSrc ?? cells[item.cell]?.splitY ?? null) : null,
     });
   };
 
@@ -251,6 +306,7 @@ export default function PdfPage({
 
   // ---------- Mengisi sel tabel kosong ----------
   const fillCell = (c) => {
+    const canGrow = R === 0 && (c.splitSrc ?? c.splitY) != null;
     const ref = c.style.refItem >= 0 ? items[c.style.refItem] : null;
     const fg = ref ? sampleColors(canvasRef.current, ref.x, ref.y, ref.x + ref.w, ref.y + ref.h).fg : "#111827";
     onAdd({
@@ -270,7 +326,9 @@ export default function PdfPage({
       bold: false,
       italic: false,
       align: "left",
-      fit: "shrink",
+      baseH: c.h,
+      growSrcAt: canGrow ? c.splitSrc ?? c.splitY : null,
+      fit: canGrow ? "grow" : "shrink",
     });
   };
 
@@ -363,6 +421,8 @@ export default function PdfPage({
       const lay = layoutText(a, W, H);
       const fsPx = lay.fs * pxW;
       const mode = a.fit || "shrink";
+      const cb = clipBoxOf(a);
+      const box = cb || { x: 0, y: 0, w: 1, h: 1 };
       const patchFit = (fit) => onPatch(a.id, { fit }, `fit:${a.id}`);
       const hasText = lay.lines.some((l) => l.text.trim());
       const showBar = sel && hasText && (lay.state === "overflow" || lay.small);
@@ -387,13 +447,24 @@ export default function PdfPage({
               onSelect(a.id);
             }}
           >
+          </div>
+          <div
+            className="ann-clip"
+            style={{
+              left: `${box.x * 100}%`,
+              top: `${box.y * 100}%`,
+              width: `${box.w * 100}%`,
+              height: `${box.h * 100}%`,
+              overflow: cb ? "hidden" : "visible",
+            }}
+          >
             {lay.lines.map((ln, i) => (
               <div
                 key={i}
                 className="ann-retext-text"
                 style={{
-                  left: (ln.x - a.x) * pxW,
-                  top: (ln.y - a.y) * pxH - ASC * fsPx,
+                  left: (ln.x - box.x) * pxW,
+                  top: (ln.y - box.y) * pxH - ASC * fsPx,
                   fontSize: fsPx,
                   color: a.color,
                   ...fontStyle(a),
@@ -433,9 +504,11 @@ export default function PdfPage({
             >
               <span>
                 {lay.state === "overflow"
-                  ? lay.overX > 0.6
-                    ? `Melewati batas kanan ±${Math.ceil(lay.overX)}pt`
-                    : `Melewati batas bawah ±${Math.ceil(lay.overY)}pt`
+                  ? lay.clipped
+                    ? "Teks terlalu panjang, terpotong di garis sel"
+                    : lay.overX > 0.6
+                      ? `Melewati batas kanan ±${Math.ceil(lay.overX)}pt`
+                      : `Melewati batas bawah ±${Math.ceil(lay.overY)}pt`
                   : `Teks diperkecil jadi ${Math.round(lay.scale * 100)}%`}
               </span>
               {mode !== "wrap" && <button type="button" onClick={() => patchFit("wrap")}>Bungkus baris</button>}

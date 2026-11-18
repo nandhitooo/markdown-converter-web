@@ -13,8 +13,10 @@ import {
   metricsReady,
   openPdf,
   pageDisplaySize,
+  rotationOf,
   uid,
 } from "../utils/pdfEditUtils";
+import { applyGrow } from "../utils/stretch";
 
 const TOOLS = [
   { id: "edit", label: "Edit teks" },
@@ -36,6 +38,7 @@ const TOOL_HINTS = {
   cover: "Seret untuk menutup area dengan kotak (default putih).",
 };
 
+const growDeps = { layoutText, pageDisplaySize, rotationOf };
 const TEXT_TYPES = ["text", "retext", "celltext"];
 const FONT_GROUPS = ["Standar", "Sans-serif", "Serif", "Monospace"];
 
@@ -60,9 +63,10 @@ const MARKS = [
 ];
 
 const FIT_MODES = [
+  { id: "grow", label: "Perbesar sel", title: "Ukuran huruf tetap; sel diperbesar dan isi halaman di bawahnya bergeser turun", needsCell: true },
   { id: "shrink", label: "Kecilkan", title: "Perkecil ukuran huruf otomatis agar muat" },
-  { id: "wrap", label: "Bungkus", title: "Pindahkan kelebihan teks ke baris berikutnya" },
-  { id: "free", label: "Bebas", title: "Biarkan apa adanya (bisa melewati batas)" },
+  { id: "wrap", label: "Bungkus", title: "Pindahkan kelebihan ke baris berikutnya (huruf diperkecil bila sel kurang tinggi)" },
+  { id: "free", label: "Bebas", title: "Biarkan apa adanya (bisa melewati garis sel)" },
 ];
 const ALIGNS = [
   { id: "left", label: "Kiri" },
@@ -74,10 +78,19 @@ const ALIGNS = [
 function describeFit(lay) {
   const pct = Math.round(lay.scale * 100);
   let r;
-  if (lay.state === "overflow") {
+  if (lay.mode === "grow") {
+    r =
+      lay.state === "overflow"
+        ? { tone: "bad", text: "Ruang kosong di bawah halaman tidak cukup untuk memperbesar sel lebih jauh, sisa teks terpotong di garis sel. Persingkat teks atau pilih Kecilkan." }
+        : lay.growPt > 0.05
+          ? { tone: "info", text: `Sel diperbesar ±${Math.ceil(lay.growPt)}pt — isi halaman di bawahnya ikut turun.` }
+          : { tone: "ok", text: "✓ Muat di sel (ukuran huruf tetap)." };
+  } else if (lay.state === "overflow") {
     const where =
       lay.overX > 0.6 ? `melewati batas kanan ±${Math.ceil(lay.overX)}pt` : `melewati batas bawah ±${Math.ceil(lay.overY)}pt`;
-    r = { tone: "bad", text: `Teks ${where}. Coba Kecilkan, Bungkus, atau persingkat teks.` };
+    r = lay.clipped
+      ? { tone: "bad", text: "Teks terlalu panjang untuk sel ini sehingga terpotong di garis sel. Persingkat teks atau pilih Bebas." }
+      : { tone: "bad", text: `Teks ${where}. Coba Kecilkan, Bungkus, atau persingkat teks.` };
   } else if (lay.small) {
     r = { tone: "warn", text: `Diperkecil ke ${pct}% — cukup kecil, pertimbangkan Bungkus atau persingkat teks.` };
   } else if (lay.state === "wrapped") {
@@ -131,8 +144,9 @@ export default function PdfEditor({ active }) {
   // ---------- State + riwayat (undo/redo) ----------
   const commit = (updater, key) => {
     const prev = pagesRef.current;
-    const next = updater(prev);
+    let next = updater(prev);
     if (next === prev) return;
+    next = applyGrow(next, growDeps); // "Perbesar sel": sesuaikan ruang yang disisipkan
     const now = Date.now();
     const coalesce = key && lastKey.current.key === key && now - lastKey.current.t < 1000;
     if (!coalesce) {
@@ -265,6 +279,19 @@ export default function PdfEditor({ active }) {
     setSelected(null);
   };
 
+  // Info halaman dari deteksi struktur (tanpa masuk riwayat undo).
+  const setPageMeta = (id, meta) => {
+    const prev = pagesRef.current;
+    const pg = prev.find((p) => p.id === id);
+    if (!pg || pg.meta?.contentBottom === meta.contentBottom) return;
+    const next = applyGrow(
+      prev.map((p) => (p.id === id ? { ...p, meta } : p)),
+      growDeps,
+    );
+    pagesRef.current = next;
+    setPages(next);
+  };
+
   // ---------- Operasi halaman ----------
   const movePage = (i, d) =>
     commit((ps) => {
@@ -359,7 +386,13 @@ export default function PdfEditor({ active }) {
     let alive = true;
     const styles = usedStyles(pages, defaultFamily);
     Promise.all(styles.flatMap((st) => [ensureFace(st.family, st), ensureMetrics(st)])).then(() => {
-      if (alive) setFontTick((t) => t + 1);
+      if (!alive) return;
+      const g = applyGrow(pagesRef.current, growDeps); // metrik font berubah → hitung ulang ruang
+      if (g !== pagesRef.current) {
+        pagesRef.current = g;
+        setPages(g);
+      }
+      setFontTick((t) => t + 1);
     });
     return () => {
       alive = false;
@@ -390,7 +423,15 @@ export default function PdfEditor({ active }) {
   // Metrik font dimuat sekali; setelahnya semua perhitungan muat/tidak memakai ukuran sebenarnya.
   useEffect(() => {
     let alive = true;
-    metricsReady.then(() => alive && setMetricsOk(true));
+    metricsReady.then(() => {
+      if (!alive) return;
+      setMetricsOk(true);
+      const g = applyGrow(pagesRef.current, growDeps);
+      if (g !== pagesRef.current) {
+        pagesRef.current = g;
+        setPages(g);
+      }
+    });
     return () => {
       alive = false;
     };
@@ -603,7 +644,7 @@ export default function PdfEditor({ active }) {
                 <div className="pe-fitrow">
                   <span className="pe-seg" role="group" aria-label="Jika teks tidak muat">
                     <span className="pe-seg-label">Jika tidak muat</span>
-                    {FIT_MODES.map((m) => (
+                    {FIT_MODES.filter((m) => !m.needsCell || selectedAnnot.growSrcAt != null).map((m) => (
                       <button
                         key={m.id}
                         type="button"
@@ -760,6 +801,7 @@ export default function PdfEditor({ active }) {
               showCells={showCells}
               defaultFamily={defaultFamily}
               onRemove={(id) => deleteAnnot(p.id, id)}
+              onMeta={setPageMeta}
               rootRef={rootRef}
               selectedId={selected?.pageId === p.id ? selected.id : null}
               onActivate={(id) => {

@@ -1,11 +1,22 @@
-import { PDFDocument, StandardFonts, rgb, degrees, LineCapStyle } from "pdf-lib";
+import {
+  PDFDocument,
+  StandardFonts,
+  rgb,
+  degrees,
+  LineCapStyle,
+  pushGraphicsState,
+  popGraphicsState,
+  rectangle,
+  clip,
+  endPath,
+} from "pdf-lib";
 import * as pdfjsLib from "pdfjs-dist";
 import { analyzePage } from "./pageStructure";
 import fontkit from "@pdf-lib/fontkit";
-import { layoutText, metricsReady, ensureMetrics, fontReady } from "./textFit";
+import { layoutText, metricsReady, ensureMetrics, fontReady, clipBoxOf } from "./textFit";
 import { fontBytes, isCustomFont, stdFamilyOf, variantKey } from "./fonts";
 
-export { layoutText, metricsReady, ensureMetrics, fontReady };
+export { layoutText, metricsReady, ensureMetrics, fontReady, clipBoxOf };
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   "pdfjs-dist/build/pdf.worker.min.mjs",
@@ -258,9 +269,10 @@ export async function exportPdf(sources, pages) {
   };
 
   // Salin halaman per sumber sekaligus supaya resource bersama (font, dll.) tidak digandakan.
+  const isStretched = (p) => !!(p.srcId && p.stretches?.length && rotationOf(p) === 0);
   const wanted = new Map();
   for (const p of pages) {
-    if (!p.srcId) continue;
+    if (!p.srcId || isStretched(p)) continue;
     if (!wanted.has(p.srcId)) wanted.set(p.srcId, []);
     wanted.get(p.srcId).push(p.srcIndex);
   }
@@ -284,9 +296,49 @@ export async function exportPdf(sources, pages) {
 
   for (const p of pages) {
     const R = rotationOf(p);
-    const page = p.srcId
-      ? out.addPage(copied.get(`${p.srcId}:${p.srcIndex}`))
-      : out.addPage([p.uw, p.uh]);
+    let page;
+    if (isStretched(p)) {
+      // "Perbesar sel": halaman dipotong per bagian lalu digeser ke bawah; celah diisi irisan 1pt yang diregangkan
+      // (garis tabel vertikal & warna latar tetap menyambung, tetap vektor).
+      const srcPage = sources[p.srcId].lib.getPage(p.srcIndex);
+      const sb = srcPage.getCropBox();
+      page = out.addPage([sb.width, sb.height]);
+      const Hh = sb.height;
+      const PAD = 0.25; // sedikit tumpang tindih agar tidak ada garis tipis di sambungan
+      const sts = [...p.stretches].sort((x, y) => x.at - y.at);
+      const yPdf = (n) => sb.y + Hh * (1 - n); // koordinat normalisasi (atas-bawah) → PDF
+      const bbox = (n0, n1, padTop, padBot) => ({
+        left: sb.x,
+        right: sb.x + sb.width,
+        bottom: yPdf(n1) - padBot,
+        top: yPdf(n0) + padTop,
+      });
+      const drawSlice = async (n0, n1, cum, first, last) => {
+        if (n1 - n0 <= 1e-9) return;
+        const padTop = first ? 0 : PAD;
+        const padBot = last ? 0 : PAD;
+        const emb = await out.embedPage(srcPage, bbox(n0, n1, padTop, padBot));
+        page.drawPage(emb, { x: 0, y: Hh * (1 - (n1 + cum)) - padBot, width: sb.width, height: emb.height });
+      };
+      let cum = 0;
+      // 1) celah (diregangkan), 2) potongan halaman di atasnya
+      for (const s of sts) {
+        const strip = 1 / Hh;
+        const emb = await out.embedPage(srcPage, bbox(s.at - strip, s.at, 0, 0));
+        page.drawPage(emb, { x: 0, y: Hh * (1 - (s.at + cum + s.d)), width: sb.width, height: s.d * Hh });
+        cum += s.d;
+      }
+      cum = 0;
+      let from = 0;
+      for (let i = 0; i < sts.length; i += 1) {
+        await drawSlice(from, sts[i].at, cum, i === 0, false);
+        cum += sts[i].d;
+        from = sts[i].at;
+      }
+      await drawSlice(from, 1, cum, sts.length === 0, true);
+    } else {
+      page = p.srcId ? out.addPage(copied.get(`${p.srcId}:${p.srcIndex}`)) : out.addPage([p.uw, p.uh]);
+    }
     page.setRotation(degrees(R));
 
     const cb = page.getCropBox();
@@ -323,12 +375,25 @@ export async function exportPdf(sources, pages) {
         const lay = layoutText(a, dispW, dispH);
         const size = lay.fs * dispW;
         const f = await getFont(a);
+        // Potong di garis sel supaya teks tidak keluar dari kolom.
+        const cb = clipBoxOf(a);
+        if (cb) {
+          const [cx1, cy1] = toUser(cb.x, cb.y);
+          const [cx2, cy2] = toUser(cb.x + cb.w, cb.y + cb.h);
+          page.pushOperators(
+            pushGraphicsState(),
+            rectangle(Math.min(cx1, cx2), Math.min(cy1, cy2), Math.abs(cx2 - cx1), Math.abs(cy2 - cy1)),
+            clip(),
+            endPath(),
+          );
+        }
         for (const ln of lay.lines) {
           const t = clean(ln.text, f);
           if (!t.trim()) continue;
           const [x, y] = toUser(ln.x, ln.y);
           page.drawText(t, { x, y, size, font: f, color: hexToRgb(a.color), rotate: degrees(R) });
         }
+        if (cb) page.pushOperators(popGraphicsState());
       } else if (a.type === "check") {
         // Tanda centang / silang / isi digambar sebagai vektor (tidak bergantung pada font).
         const s = a.w * dispW;
