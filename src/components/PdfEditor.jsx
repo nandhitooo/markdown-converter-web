@@ -22,6 +22,7 @@ const TOOLS = [
   { id: "text", label: "Tambah teks" },
   { id: "draw", label: "Pensil" },
   { id: "highlight", label: "Sorot" },
+  { id: "check", label: "Centang" },
   { id: "cover", label: "Tutup" },
 ];
 
@@ -31,6 +32,7 @@ const TOOL_HINTS = {
   text: "Klik halaman untuk menambah teks. Klik sel tabel kosong untuk mengisinya.",
   draw: "Tahan dan seret untuk menggambar / tanda tangan.",
   highlight: "Seret untuk menyorot area.",
+  check: "Klik kotak centang (☐) untuk mencentang / batal. Klik area lain untuk menaruh tanda bebas.",
   cover: "Seret untuk menutup area dengan kotak (default putih).",
 };
 
@@ -50,6 +52,12 @@ const usedStyles = (pages, extraFamily) => {
   if (extraFamily) m.set(`${extraFamily}|false|false`, { family: extraFamily, bold: false, italic: false });
   return [...m.values()];
 };
+
+const MARKS = [
+  { id: "check", label: "✓ Centang" },
+  { id: "cross", label: "✗ Silang" },
+  { id: "fill", label: "■ Isi" },
+];
 
 const FIT_MODES = [
   { id: "shrink", label: "Kecilkan", title: "Perkecil ukuran huruf otomatis agar muat" },
@@ -79,7 +87,7 @@ function describeFit(lay) {
   } else {
     r = { tone: "ok", text: "✓ Muat di area." };
   }
-  if (lay.unsupported) r.text += ` ${lay.unsupported} karakter tidak didukung font standar (jadi “?”).`;
+  if (lay.unsupported) r.text += ` ${lay.unsupported} karakter tidak didukung font (jadi “?”).`;
   return r;
 }
 
@@ -504,7 +512,7 @@ export default function PdfEditor({ active }) {
             <input type="color" value={color} onChange={(e) => setColor(e.target.value)} />
           </label>
           <span className="status">{TOOL_HINTS[tool]}</span>
-          {(tool === "edit" || tool === "text") && (
+          {(tool === "edit" || tool === "text" || tool === "check") && (
             <label className="pe-toggle" title="Tampilkan garis bantu sel tabel yang terdeteksi">
               <input type="checkbox" checked={showCells} onChange={(e) => setShowCells(e.target.checked)} />
               Sorot sel tabel
@@ -627,6 +635,36 @@ export default function PdfEditor({ active }) {
                   )}
                 </div>
               )}
+              {selectedAnnot.type === "check" && (
+                <>
+                  <span className="pe-seg" role="group" aria-label="Jenis tanda">
+                    <span className="pe-seg-label">Tanda</span>
+                    {MARKS.map((m) => (
+                      <button
+                        key={m.id}
+                        type="button"
+                        className={`pe-seg-btn${(selectedAnnot.mark || "check") === m.id ? " on" : ""}`}
+                        onClick={() => patchAnnot(selected.pageId, selected.id, { mark: m.id })}
+                      >
+                        {m.label}
+                      </button>
+                    ))}
+                  </span>
+                  <label className="pe-field">
+                    Ukuran {Math.round(selectedAnnot.w * selectedW)}pt
+                    <input
+                      type="range"
+                      min="0.008"
+                      max="0.08"
+                      step="0.001"
+                      value={selectedAnnot.w}
+                      onChange={(e) =>
+                        patchAnnot(selected.pageId, selected.id, { w: +e.target.value }, key(selected.id))
+                      }
+                    />
+                  </label>
+                </>
+              )}
               {selectedAnnot.type === "path" && (
                 <label className="pe-field">
                   Tebal
@@ -721,6 +759,7 @@ export default function PdfEditor({ active }) {
               color={color}
               showCells={showCells}
               defaultFamily={defaultFamily}
+              onRemove={(id) => deleteAnnot(p.id, id)}
               rootRef={rootRef}
               selectedId={selected?.pageId === p.id ? selected.id : null}
               onActivate={(id) => {

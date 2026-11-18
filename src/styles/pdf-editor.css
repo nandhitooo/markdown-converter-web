@@ -43,6 +43,7 @@
 .pe-overlay.tool-draw,
 .pe-overlay.tool-highlight,
 .pe-overlay.tool-cover { cursor: crosshair; touch-action: none; }
+.pe-overlay.tool-check { cursor: crosshair; }
 
 .ann { position: absolute; touch-action: none; user-select: none; }
 .ann-text { white-space: pre; line-height: 1.2; font-family: Helvetica, Arial, sans-serif; cursor: move; }
@@ -101,3 +102,8 @@
 .pe-fitchip.tone-bad { color: #991b1b; background: #fef2f2; border-color: #fca5a5; }
 
 .pe-font-select { min-width: 150px; max-width: 200px; padding: 0.3rem 0.4rem; font-size: 0.85rem; color: var(--text-h); border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
+
+.pe-box { position: absolute; cursor: pointer; touch-action: manipulation; border-radius: 2px; }
+.pe-box.show { outline: 1.5px dashed rgba(16, 185, 129, 0.8); outline-offset: 2px; }
+.pe-box:hover { background: rgba(16, 185, 129, 0.25); outline: 2px solid #10b981; outline-offset: 2px; }
+.pe-box.on.show { outline-style: solid; }

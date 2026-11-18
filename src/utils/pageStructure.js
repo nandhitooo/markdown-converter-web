@@ -1,9 +1,10 @@
 // Analisis satu halaman: teks asli (digabung per baris), garis, sel tabel, dan "ruang"
 // yang tersedia bagi tiap teks. Bebas dependensi pdf.js (Util/OPS disuntikkan) agar mudah diuji.
-import { detectCells } from "./tableDetect.js";
+import { detectCells, groupTables } from "./tableDetect.js";
 
 const MARGIN = 10; // batas aman dari tepi halaman (pt)
 const INSET = 1; // inset sel agar garis tabel tidak tertimpa
+const BOX_GLYPH = /^[\u2610\u2611\u2612\u25A1\u25A2\u25FB\u2B1C\u2B1A\u274F-\u2752]$/; // ☐ ☑ ☒ □ ▢ dll.
 
 const median = (arr) => {
   if (!arr.length) return null;
@@ -55,7 +56,27 @@ export function analyzePage({ tc, opList, vp, Util, OPS, fontInfo }) {
   } catch (err) {
     console.warn("Deteksi tabel gagal:", err);
   }
-  const { cells: rawCells, hLines, vLines, tables } = det;
+  const { hLines, vLines } = det;
+
+  // Kotak kecil (±4–22pt, hampir persegi) tanpa teks di dalamnya = kotak centang, bukan sel tabel.
+  const insideText = (c) =>
+    items.some((m) => {
+      const cx = m.x + m.w / 2;
+      const cy = m.y - 0.3 * m.h;
+      return cx >= c.x0 && cx <= c.x1 && cy >= c.y0 && cy <= c.y1;
+    });
+  const boxRects = [];
+  const rawCells = det.cells.filter((c) => {
+    const w = c.x1 - c.x0;
+    const h = c.y1 - c.y0;
+    const small = w <= 22 && h <= 22 && Math.min(w, h) >= 4 && Math.min(w, h) / Math.max(w, h) >= 0.6;
+    if (small && !insideText(c)) {
+      boxRects.push(c);
+      return false;
+    }
+    return w >= 6 && h >= 6;
+  });
+  const tables = groupTables(rawCells);
 
   // ---- 2) Pasangkan teks dengan sel (sel terkecil yang memuat titik tengah teks) ----
   const cellOf = items.map((m) => {
@@ -76,6 +97,30 @@ export function analyzePage({ tc, opList, vp, Util, OPS, fontInfo }) {
   });
 
   // ---- 3) Ruang, perataan, dan kotak penutup tiap teks ----
+  // Kotak centang berupa karakter (☐ dsb.): dicatat sebagai kotak, bukan teks yang diedit.
+  const boxes = boxRects.map((c) => ({
+    key: `r${Math.round(c.x0)}:${Math.round(c.y0)}`,
+    x: c.x0 / W,
+    y: c.y0 / H,
+    w: (c.x1 - c.x0) / W,
+    h: (c.y1 - c.y0) / H,
+  }));
+  const glyphBox = new Map();
+  items.forEach((m, idx) => {
+    if (!BOX_GLYPH.test(m.str.trim())) return;
+    const side = 0.7 * m.h;
+    const cx = m.x + m.w / 2;
+    const cy = m.y - 0.35 * m.h;
+    glyphBox.set(idx, boxes.length);
+    boxes.push({
+      key: `g${Math.round(m.x)}:${Math.round(m.y)}`,
+      x: (cx - side / 2) / W,
+      y: (cy - side / 2) / H,
+      w: side / W,
+      h: side / H,
+    });
+  });
+
   const outItems = items.map((m, idx) => {
     const cell = cellOf[idx] >= 0 ? rawCells[cellOf[idx]] : null;
     const cx = m.x + m.w / 2;
@@ -175,6 +220,7 @@ export function analyzePage({ tc, opList, vp, Util, OPS, fontInfo }) {
       lim: [lim0 / W, lim1 / W],
       limB: limB / H,
       cell: cellOf[idx],
+      glyphBox: glyphBox.has(idx) ? glyphBox.get(idx) : null,
     };
   });
 
@@ -221,5 +267,5 @@ export function analyzePage({ tc, opList, vp, Util, OPS, fontInfo }) {
     };
   });
 
-  return { items: outItems, cells, W, H };
+  return { items: outItems, cells, boxes, W, H };
 }

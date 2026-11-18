@@ -329,6 +329,30 @@ export async function exportPdf(sources, pages) {
           const [x, y] = toUser(ln.x, ln.y);
           page.drawText(t, { x, y, size, font: f, color: hexToRgb(a.color), rotate: degrees(R) });
         }
+      } else if (a.type === "check") {
+        // Tanda centang / silang / isi digambar sebagai vektor (tidak bergantung pada font).
+        const s = a.w * dispW;
+        const hn = s / dispH;
+        const pt = (px, py) => toUser(a.x + px * a.w, a.y + py * hn);
+        const col = hexToRgb(a.color);
+        const thick = Math.max(0.6, (a.th || 0.13) * s);
+        const seg = (p, q) => {
+          const [x1, y1] = pt(...p);
+          const [x2, y2] = pt(...q);
+          page.drawLine({ start: { x: x1, y: y1 }, end: { x: x2, y: y2 }, thickness: thick, color: col, lineCap: LineCapStyle.Round });
+        };
+        const mark = a.mark || "check";
+        if (mark === "cross") {
+          seg([0.15, 0.15], [0.85, 0.85]);
+          seg([0.85, 0.15], [0.15, 0.85]);
+        } else if (mark === "fill") {
+          const [x1, y1] = pt(0.15, 0.15);
+          const [x2, y2] = pt(0.85, 0.85);
+          page.drawRectangle({ x: Math.min(x1, x2), y: Math.min(y1, y2), width: Math.abs(x2 - x1), height: Math.abs(y2 - y1), color: col, borderWidth: 0 });
+        } else {
+          seg([0.12, 0.55], [0.4, 0.82]);
+          seg([0.4, 0.82], [0.88, 0.18]);
+        }
       } else if (a.type === "highlight" || a.type === "cover") {
         const [x1, y1] = toUser(a.x, a.y);
         const [x2, y2] = toUser(a.x + a.w, a.y + a.h);

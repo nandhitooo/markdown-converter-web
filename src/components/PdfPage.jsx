@@ -32,6 +32,7 @@ export default function PdfPage({
   color,
   showCells,
   defaultFamily,
+  onRemove,
   selectedId,
   rootRef,
   onActivate,
@@ -58,7 +59,8 @@ export default function PdfPage({
   const [structure, setStructure] = useState(null); // { items, cells } hasil deteksi (null = belum dimuat)
   const items = structure ? structure.items : null;
   const cells = structure ? structure.cells : [];
-  const needStructure = tool === "edit" || tool === "text";
+  const boxes = structure?.boxes || [];
+  const needStructure = tool === "edit" || tool === "text" || tool === "check";
 
   const setDraft = (d) => {
     draftRef.current = d;
@@ -145,6 +147,11 @@ export default function PdfPage({
       onAdd({ id: uid("an"), type: "text", x: u, y: v, fs: 0.022, text: "Ketik teks", color, family: defaultFamily });
       return;
     }
+    if (tool === "check") {
+      const s = 0.024;
+      onAdd({ id: uid("an"), type: "check", x: u - s / 2, y: v - (s * W) / H / 2, w: s, mark: "check", color, th: 0.13 });
+      return;
+    }
     e.currentTarget.setPointerCapture(e.pointerId);
     if (tool === "draw") setDraft({ kind: "path", points: [[u, v]] });
     else setDraft({ kind: "rect", x0: u, y0: v, x1: u, y1: v });
@@ -215,6 +222,30 @@ export default function PdfPage({
       anc: item.anc,
       lim: item.lim,
       limB: item.limB,
+    });
+  };
+
+  // ---------- Kotak centang: klik = centang, klik lagi = batal ----------
+  const onBoxDown = (e, b) => {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    e.stopPropagation();
+    onActivate(page.id);
+    const ex = page.annots.find((a) => a.type === "check" && a.boxKey === b.key);
+    if (ex) {
+      onRemove(ex.id);
+      return;
+    }
+    const side = Math.max(b.w * W, b.h * H) * 1.3; // sedikit lebih besar dari kotaknya
+    onAdd({
+      id: uid("an"),
+      type: "check",
+      boxKey: b.key,
+      x: b.x + b.w / 2 - side / W / 2,
+      y: b.y + b.h / 2 - side / H / 2,
+      w: side / W,
+      mark: "check",
+      color,
+      th: 0.13,
     });
   };
 
@@ -414,6 +445,28 @@ export default function PdfPage({
         </Fragment>
       );
     }
+    if (a.type === "check") {
+      const size = a.w * pxW;
+      const sw = a.th || 0.13;
+      return (
+        <div
+          key={a.id}
+          className={cls}
+          style={{ left: `${a.x * 100}%`, top: `${a.y * 100}%`, width: size, height: size, ...pe }}
+          {...handlers(a)}
+        >
+          <svg width={size} height={size} viewBox="0 0 1 1" style={{ display: "block", overflow: "visible" }}>
+            {(a.mark || "check") === "check" && (
+              <polyline points="0.12,0.55 0.4,0.82 0.88,0.18" fill="none" stroke={a.color} strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round" />
+            )}
+            {a.mark === "cross" && (
+              <path d="M0.15 0.15L0.85 0.85M0.85 0.15L0.15 0.85" fill="none" stroke={a.color} strokeWidth={sw} strokeLinecap="round" />
+            )}
+            {a.mark === "fill" && <rect x="0.15" y="0.15" width="0.7" height="0.7" fill={a.color} />}
+          </svg>
+        </div>
+      );
+    }
     if (a.type === "highlight" || a.type === "cover") {
       return <div key={a.id} className={cls} style={{ ...rectStyle(a), ...pe }} {...handlers(a)} />;
     }
@@ -485,7 +538,8 @@ export default function PdfPage({
               ? " — tidak ada teks/tabel terdeteksi (mungkin hasil scan)"
               : structure.cells.length > 0
                 ? ` — ${structure.cells.length} sel tabel terdeteksi`
-                : "")}
+                : "") +
+              (structure.boxes?.length ? ` · ${structure.boxes.length} kotak centang` : "")}
         </span>
         <span className="pe-page-actions">
           <button type="button" title="Naikkan" disabled={index === 0} onClick={() => onMove(-1)}>↑</button>
@@ -539,11 +593,25 @@ export default function PdfPage({
               );
             })}
 
+          {(tool === "edit" || tool === "check") &&
+            boxes.map((b) => {
+              const on = page.annots.some((a) => a.type === "check" && a.boxKey === b.key);
+              return (
+                <div
+                  key={`box${b.key}`}
+                  className={`pe-box${on ? " on" : ""}${showCells ? " show" : ""}`}
+                  title={on ? "Klik untuk membatalkan centang" : "Klik untuk mencentang"}
+                  style={{ left: `${b.x * 100}%`, top: `${b.y * 100}%`, width: `${b.w * 100}%`, height: `${b.h * 100}%` }}
+                  onPointerDown={(e) => onBoxDown(e, b)}
+                />
+              );
+            })}
+
           {page.annots.map(renderAnnot)}
 
           {tool === "edit" &&
             items?.map((it, i) =>
-              page.annots.some((a) => a.type === "retext" && a.origIdx === i) ? null : (
+              it.glyphBox != null || page.annots.some((a) => a.type === "retext" && a.origIdx === i) ? null : (
                 <div
                   key={`ti${i}`}
                   className="pe-textbox"

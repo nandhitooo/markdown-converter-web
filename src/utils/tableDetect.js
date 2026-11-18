@@ -260,7 +260,7 @@ export function buildCells(hLines, vLines, W, H) {
     const y1 = ys[c.j1 + 1];
     const w = x1 - x0;
     const h = y1 - y0;
-    if (w < 6 || h < 6) continue;
+    if (w < 4 || h < 4) continue;
     if (w * h > 0.4 * W * H) continue; // bingkai halaman / area sisa, bukan sel
     cells.push({ x0, y0, x1, y1 });
   }
